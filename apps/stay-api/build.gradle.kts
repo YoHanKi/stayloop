@@ -15,6 +15,9 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:${project.properties["springDocOpenApiVersion"]}")
 
+    // crypto
+    implementation("org.springframework.security:spring-security-crypto")
+
     // querydsl
     kapt("com.querydsl:querydsl-apt::jakarta")
 
