@@ -2,9 +2,14 @@ package com.stayloop.domain.user.value
 
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
+import jakarta.persistence.Column
+import jakarta.persistence.Embeddable
 
-@JvmInline
-value class PhoneNumber(val value: String) {
+@Embeddable
+data class PhoneNumber(
+    @Column(name = "phone_number", nullable = false, length = 20)
+    val value: String,
+) {
     init {
         if (!REGEX.matches(value)) {
             throw CoreException(ErrorType.BAD_REQUEST, "휴대폰 번호는 010-XXXX-XXXX 형식이어야 합니다.")

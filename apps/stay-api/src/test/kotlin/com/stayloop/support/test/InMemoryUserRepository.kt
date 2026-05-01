@@ -1,33 +1,31 @@
 package com.stayloop.support.test
 
+import com.stayloop.domain.BaseEntity
 import com.stayloop.domain.user.User
 import com.stayloop.domain.user.UserRepository
 import com.stayloop.domain.user.value.LoginId
 
 class InMemoryUserRepository : UserRepository {
-    private val storeById = mutableMapOf<Long, User>()
-    private val idByLoginId = mutableMapOf<String, Long>()
+    private val store = mutableMapOf<Long, User>()
     private var sequence = 0L
 
     override fun save(user: User): User {
-        val id = if (user.id == 0L) ++sequence else user.id
-        val saved = User.reconstruct(
-            id = id,
-            loginId = user.loginId,
-            password = user.password,
-            name = user.name,
-            birthDate = user.birthDate,
-            email = user.email,
-            phoneNumber = user.phoneNumber,
-        )
-        storeById[id] = saved
-        idByLoginId[user.loginId.value] = id
-        return saved
+        if (user.id == 0L) {
+            assignId(user, ++sequence)
+        }
+        store[user.id] = user
+        return user
     }
 
     override fun findByLoginId(loginId: LoginId): User? =
-        idByLoginId[loginId.value]?.let { storeById[it] }
+        store.values.firstOrNull { it.loginId == loginId }
 
     override fun existsByLoginId(loginId: LoginId): Boolean =
-        idByLoginId.containsKey(loginId.value)
+        store.values.any { it.loginId == loginId }
+
+    private fun assignId(user: User, id: Long) {
+        val field = BaseEntity::class.java.getDeclaredField("id")
+        field.isAccessible = true
+        field.setLong(user, id)
+    }
 }

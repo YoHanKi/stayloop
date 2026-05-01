@@ -1,5 +1,6 @@
 package com.stayloop.domain.user
 
+import com.stayloop.domain.BaseEntity
 import com.stayloop.domain.user.value.BirthDate
 import com.stayloop.domain.user.value.Email
 import com.stayloop.domain.user.value.LoginId
@@ -8,18 +9,48 @@ import com.stayloop.domain.user.value.Password
 import com.stayloop.domain.user.value.PhoneNumber
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
+import jakarta.persistence.Embedded
+import jakarta.persistence.Entity
+import jakarta.persistence.Table
+import jakarta.persistence.UniqueConstraint
 
-class User private constructor(
-    val id: Long,
-    val loginId: LoginId,
+@Entity
+@Table(
+    name = "users",
+    uniqueConstraints = [UniqueConstraint(name = "uk_users_login_id", columnNames = ["login_id"])],
+)
+class User internal constructor(
+    loginId: LoginId,
     password: Password,
-    val name: Name,
-    val birthDate: BirthDate,
-    val email: Email,
-    val phoneNumber: PhoneNumber,
-) {
+    name: Name,
+    birthDate: BirthDate,
+    email: Email,
+    phoneNumber: PhoneNumber,
+) : BaseEntity() {
+
+    @Embedded
+    var loginId: LoginId = loginId
+        protected set
+
+    @Embedded
     var password: Password = password
-        private set
+        protected set
+
+    @Embedded
+    var name: Name = name
+        protected set
+
+    @Embedded
+    var birthDate: BirthDate = birthDate
+        protected set
+
+    @Embedded
+    var email: Email = email
+        protected set
+
+    @Embedded
+    var phoneNumber: PhoneNumber = phoneNumber
+        protected set
 
     fun authenticate(rawPassword: String, encoder: PasswordEncoder) {
         if (!password.matches(rawPassword, encoder)) {
@@ -46,28 +77,8 @@ class User private constructor(
             encoder: PasswordEncoder,
         ): User =
             User(
-                id = 0L,
                 loginId = loginId,
                 password = Password.ofRaw(rawPassword, birthDate, encoder),
-                name = name,
-                birthDate = birthDate,
-                email = email,
-                phoneNumber = phoneNumber,
-            )
-
-        fun reconstruct(
-            id: Long,
-            loginId: LoginId,
-            password: Password,
-            name: Name,
-            birthDate: BirthDate,
-            email: Email,
-            phoneNumber: PhoneNumber,
-        ): User =
-            User(
-                id = id,
-                loginId = loginId,
-                password = password,
                 name = name,
                 birthDate = birthDate,
                 email = email,

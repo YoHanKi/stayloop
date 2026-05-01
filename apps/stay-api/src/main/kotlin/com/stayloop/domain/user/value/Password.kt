@@ -3,8 +3,14 @@ package com.stayloop.domain.user.value
 import com.stayloop.domain.user.PasswordEncoder
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
+import jakarta.persistence.Column
+import jakarta.persistence.Embeddable
 
-class Password private constructor(val encoded: String) {
+@Embeddable
+class Password private constructor(
+    @Column(name = "password", nullable = false, length = 100)
+    val encoded: String,
+) {
     fun matches(raw: String, encoder: PasswordEncoder): Boolean = encoder.matches(raw, encoded)
 
     override fun equals(other: Any?): Boolean = other is Password && encoded == other.encoded

@@ -15,6 +15,7 @@ plugins {
     kotlin("jvm")
     kotlin("kapt")
     kotlin("plugin.spring") apply false
+    kotlin("plugin.allopen") apply false
     id("org.springframework.boot") apply false
     id("io.spring.dependency-management")
     id("org.jlleitschuh.gradle.ktlint") apply false
@@ -47,10 +48,17 @@ subprojects {
     apply(plugin = "org.jetbrains.kotlin.jvm")
     apply(plugin = "org.jetbrains.kotlin.kapt")
     apply(plugin = "org.jetbrains.kotlin.plugin.spring")
+    apply(plugin = "org.jetbrains.kotlin.plugin.allopen")
     apply(plugin = "org.springframework.boot")
     apply(plugin = "io.spring.dependency-management")
     apply(plugin = "jacoco")
     apply(plugin = "org.jlleitschuh.gradle.ktlint")
+
+    extensions.configure<org.jetbrains.kotlin.allopen.gradle.AllOpenExtension> {
+        annotation("jakarta.persistence.Entity")
+        annotation("jakarta.persistence.MappedSuperclass")
+        annotation("jakarta.persistence.Embeddable")
+    }
 
     dependencyManagement {
         imports {
