@@ -34,7 +34,5 @@ class Password private constructor(
             }
             return Password(encoder.encode(raw))
         }
-
-        fun ofEncoded(encoded: String): Password = Password(encoded)
     }
 }

@@ -62,12 +62,4 @@ class PasswordTest {
         assertThat(password.matches("Abcd1234!", encoder)).isTrue()
         assertThat(password.matches("Wrong1234!", encoder)).isFalse()
     }
-
-    @DisplayName("ofEncoded() 는 정책 검증 없이 저장된 해시를 그대로 감싼다.")
-    @Test
-    fun shouldWrapEncoded_withoutValidation() {
-        val password = Password.ofEncoded("any-hash-value")
-
-        assertThat(password.encoded).isEqualTo("any-hash-value")
-    }
 }
