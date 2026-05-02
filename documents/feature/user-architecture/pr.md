@@ -1,3 +1,5 @@
+# migration: 유저 도메인 아키텍처 마이그레이션
+
 ## TL;DR
 
 회원 도메인의 패키지·명명 규약을 Stayloop 의 표준 아키텍처(Example 패턴)에 맞춰 정렬했다. 도메인 레이어에 `UserService` 를 신설해 비즈니스 규칙을 끌어모으고, 애플리케이션 레이어의 `UserFacade` 는 트랜잭션 경계 + DTO 매핑만 책임지도록 책임을 분리했다. 컨트롤러는 `UserV1Controller` + `UserV1ApiSpec` 으로 OpenAPI 명세를 코드로 표현하고, 요청·응답 DTO 는 `UserV1Dto` 의 중첩 클래스로 통합했다. 인프라스트럭처는 `UserJpaRepository`(순수 Spring Data) + `UserRepositoryImpl`(@Component) 로 분리해 도메인이 Spring Data 에 직접 결합되지 않도록 했다. 테스트는 새 구조에 맞춰 도메인/애플리케이션/E2E 로 재배치했다.
