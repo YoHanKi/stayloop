@@ -71,8 +71,12 @@ flowchart LR
 
 ## 리뷰 포인트
 <!--
-시니어가 어디부터 보면 되는지 1~3개. 의심스러운 코드, 관용에서 벗어난 곳을 먼저 적는다.
+사람 리뷰어용 섹션. 시니어가 어디부터 보면 되는지 1~3개. 의심스러운 코드, 관용에서 벗어난 곳을 먼저 적는다.
 없으면 섹션 통째 삭제.
+
+주의: GitHub Copilot 자동 리뷰는 PR 본문을 읽는다는 보장이 없다. Copilot 이 따라야 할 규칙은
+`.github/copilot-instructions.md` 또는 `.github/instructions/*.instructions.md` 에 일반 규칙으로
+인코딩한다. 이 섹션에 적은 항목을 Copilot 이 답변하지 않더라도 이상 동작이 아니다.
 -->
 
 - 
