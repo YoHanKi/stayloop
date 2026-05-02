@@ -1,6 +1,6 @@
 package com.stayloop.application.user
 
-import com.stayloop.domain.user.User
+import com.stayloop.domain.user.UserModel
 
 data class UserInfo(
     val loginId: String,
@@ -10,7 +10,7 @@ data class UserInfo(
     val maskedPhoneNumber: String,
 ) {
     companion object {
-        fun from(user: User): UserInfo =
+        fun from(user: UserModel): UserInfo =
             UserInfo(
                 loginId = user.loginId.value,
                 maskedName = user.name.masked(),

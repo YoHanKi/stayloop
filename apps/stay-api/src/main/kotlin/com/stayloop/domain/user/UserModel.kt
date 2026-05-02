@@ -19,7 +19,7 @@ import jakarta.persistence.UniqueConstraint
     name = "users",
     uniqueConstraints = [UniqueConstraint(name = "uk_users_login_id", columnNames = ["login_id"])],
 )
-class User internal constructor(
+class UserModel internal constructor(
     loginId: LoginId,
     password: Password,
     name: Name,
@@ -75,8 +75,8 @@ class User internal constructor(
             email: Email,
             phoneNumber: PhoneNumber,
             encoder: PasswordEncoder,
-        ): User =
-            User(
+        ): UserModel =
+            UserModel(
                 loginId = loginId,
                 password = Password.ofRaw(rawPassword, birthDate, encoder),
                 name = name,

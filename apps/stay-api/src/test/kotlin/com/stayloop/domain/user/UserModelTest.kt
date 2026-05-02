@@ -14,11 +14,11 @@ import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import java.time.LocalDate
 
-class UserTest {
+class UserModelTest {
     private val encoder = FakePasswordEncoder()
 
-    private fun newUser(rawPassword: String = "Abcd1234!"): User =
-        User.create(
+    private fun newUser(rawPassword: String = "Abcd1234!"): UserModel =
+        UserModel.create(
             loginId = LoginId("alen01"),
             rawPassword = rawPassword,
             name = Name("홍길동"),

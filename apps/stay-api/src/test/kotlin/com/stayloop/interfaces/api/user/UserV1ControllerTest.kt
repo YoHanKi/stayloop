@@ -2,8 +2,8 @@ package com.stayloop.interfaces.api.user
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.ninjasquad.springmockk.MockkBean
+import com.stayloop.application.user.UserFacade
 import com.stayloop.application.user.UserInfo
-import com.stayloop.application.user.UserService
 import com.stayloop.application.user.command.ChangePasswordCommand
 import com.stayloop.application.user.command.SignUpCommand
 import com.stayloop.domain.user.value.LoginId
@@ -11,8 +11,6 @@ import com.stayloop.interfaces.api.ApiControllerAdvice
 import com.stayloop.interfaces.api.auth.LoginCredentials
 import com.stayloop.interfaces.api.auth.LoginCredentialsArgumentResolver
 import com.stayloop.interfaces.api.auth.WebMvcConfig
-import com.stayloop.interfaces.api.user.dto.ChangePasswordRequest
-import com.stayloop.interfaces.api.user.dto.SignUpRequest
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
 import io.mockk.every
@@ -32,14 +30,14 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 
-@WebMvcTest(controllers = [UserController::class])
+@WebMvcTest(controllers = [UserV1Controller::class])
 @Import(WebMvcConfig::class, LoginCredentialsArgumentResolver::class, ApiControllerAdvice::class)
-class UserControllerTest(
+class UserV1ControllerTest(
     @Autowired private val mockMvc: MockMvc,
     @Autowired private val objectMapper: ObjectMapper,
 ) {
     @MockkBean
-    private lateinit var userService: UserService
+    private lateinit var userFacade: UserFacade
 
     private val sampleInfo = UserInfo(
         loginId = "alen01",
@@ -54,8 +52,8 @@ class UserControllerTest(
     fun shouldSignUpAndReturnCreated() {
         // arrange
         val captured = slot<SignUpCommand>()
-        every { userService.signUp(capture(captured)) } returns sampleInfo
-        val body = SignUpRequest(
+        every { userFacade.signUp(capture(captured)) } returns sampleInfo
+        val body = UserV1Dto.SignUpRequest(
             loginId = "alen01",
             password = "Abcd1234!",
             name = "홍길동",
@@ -76,13 +74,13 @@ class UserControllerTest(
             .andExpect(jsonPath("$.data.name").value("홍길*"))
             .andExpect(jsonPath("$.data.phoneNumber").value("010-****-5678"))
 
-        verify(exactly = 1) { userService.signUp(any()) }
+        verify(exactly = 1) { userFacade.signUp(any()) }
     }
 
     @DisplayName("POST /api/v1/users 는 잘못된 형식의 휴대폰 번호를 BAD_REQUEST 로 응답한다.")
     @Test
     fun shouldReturnBadRequest_whenPhoneFormatInvalid() {
-        val body = SignUpRequest(
+        val body = UserV1Dto.SignUpRequest(
             loginId = "alen01",
             password = "Abcd1234!",
             name = "홍길동",
@@ -103,8 +101,8 @@ class UserControllerTest(
     @DisplayName("POST /api/v1/users 는 중복 로그인 ID 에 대해 CONFLICT 로 응답한다.")
     @Test
     fun shouldReturnConflict_whenLoginIdAlreadyExists() {
-        every { userService.signUp(any()) } throws CoreException(ErrorType.CONFLICT, "이미 사용 중인 로그인 ID 입니다.")
-        val body = SignUpRequest(
+        every { userFacade.signUp(any()) } throws CoreException(ErrorType.CONFLICT, "이미 사용 중인 로그인 ID 입니다.")
+        val body = UserV1Dto.SignUpRequest(
             loginId = "alen01",
             password = "Abcd1234!",
             name = "홍길동",
@@ -125,8 +123,8 @@ class UserControllerTest(
     @DisplayName("POST /api/v1/users 는 동시성으로 인해 DB unique 제약이 깨져도 CONFLICT 로 응답한다.")
     @Test
     fun shouldReturnConflict_whenUniqueConstraintViolatedAtDb() {
-        every { userService.signUp(any()) } throws DataIntegrityViolationException("uk_users_login_id 제약 위반")
-        val body = SignUpRequest(
+        every { userFacade.signUp(any()) } throws DataIntegrityViolationException("uk_users_login_id 제약 위반")
+        val body = UserV1Dto.SignUpRequest(
             loginId = "alen01",
             password = "Abcd1234!",
             name = "홍길동",
@@ -154,7 +152,7 @@ class UserControllerTest(
     @DisplayName("GET /api/v1/users/me 는 인증 성공 시 마스킹된 응답을 돌려준다.")
     @Test
     fun shouldReturnMyInfo_whenAuthenticated() {
-        every { userService.getMyInfo(LoginId("alen01"), "Abcd1234!") } returns sampleInfo
+        every { userFacade.getMyInfo(LoginId("alen01"), "Abcd1234!") } returns sampleInfo
 
         mockMvc.perform(
             get("/api/v1/users/me")
@@ -169,7 +167,7 @@ class UserControllerTest(
     @DisplayName("GET /api/v1/users/me 는 비밀번호 불일치 시 UNAUTHORIZED 로 응답한다.")
     @Test
     fun shouldReturnUnauthorized_whenPasswordMismatch() {
-        every { userService.getMyInfo(LoginId("alen01"), "Wrong1234!") } throws
+        every { userFacade.getMyInfo(LoginId("alen01"), "Wrong1234!") } throws
             CoreException(ErrorType.UNAUTHORIZED, "로그인 ID 또는 비밀번호가 일치하지 않습니다.")
 
         mockMvc.perform(
@@ -184,8 +182,8 @@ class UserControllerTest(
     @Test
     fun shouldChangePassword() {
         val captured = slot<ChangePasswordCommand>()
-        every { userService.changePassword(capture(captured)) } returns sampleInfo
-        val body = ChangePasswordRequest(currentPassword = "Abcd1234!", newPassword = "NewPass99@")
+        every { userFacade.changePassword(capture(captured)) } returns sampleInfo
+        val body = UserV1Dto.ChangePasswordRequest(currentPassword = "Abcd1234!", newPassword = "NewPass99@")
 
         mockMvc.perform(
             patch("/api/v1/users/me/password")
@@ -198,7 +196,7 @@ class UserControllerTest(
             .andExpect(jsonPath("$.data.loginId").value("alen01"))
 
         verify(exactly = 1) {
-            userService.changePassword(
+            userFacade.changePassword(
                 match {
                     it.loginId.value == "alen01" &&
                         it.currentRawPassword == "Abcd1234!" &&
@@ -211,9 +209,9 @@ class UserControllerTest(
     @DisplayName("PATCH /api/v1/users/me/password 는 동일 비밀번호 변경 시 BAD_REQUEST 로 응답한다.")
     @Test
     fun shouldReturnBadRequest_whenNewPasswordSameAsCurrent() {
-        every { userService.changePassword(any()) } throws
+        every { userFacade.changePassword(any()) } throws
             CoreException(ErrorType.BAD_REQUEST, "현재 비밀번호와 동일한 비밀번호로는 변경할 수 없습니다.")
-        val body = ChangePasswordRequest(currentPassword = "Abcd1234!", newPassword = "Abcd1234!")
+        val body = UserV1Dto.ChangePasswordRequest(currentPassword = "Abcd1234!", newPassword = "Abcd1234!")
 
         mockMvc.perform(
             patch("/api/v1/users/me/password")
