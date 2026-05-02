@@ -23,6 +23,7 @@ import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest
 import org.springframework.context.annotation.Import
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.http.MediaType
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
@@ -103,6 +104,28 @@ class UserControllerTest(
     @Test
     fun shouldReturnConflict_whenLoginIdAlreadyExists() {
         every { userService.signUp(any()) } throws CoreException(ErrorType.CONFLICT, "이미 사용 중인 로그인 ID 입니다.")
+        val body = SignUpRequest(
+            loginId = "alen01",
+            password = "Abcd1234!",
+            name = "홍길동",
+            birthDate = "2000-01-01",
+            email = "alen@stayloop.io",
+            phoneNumber = "010-1234-5678",
+        )
+
+        mockMvc.perform(
+            post("/api/v1/users")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(body)),
+        )
+            .andExpect(status().isConflict)
+            .andExpect(jsonPath("$.meta.result").value("FAIL"))
+    }
+
+    @DisplayName("POST /api/v1/users 는 동시성으로 인해 DB unique 제약이 깨져도 CONFLICT 로 응답한다.")
+    @Test
+    fun shouldReturnConflict_whenUniqueConstraintViolatedAtDb() {
+        every { userService.signUp(any()) } throws DataIntegrityViolationException("uk_users_login_id 제약 위반")
         val body = SignUpRequest(
             loginId = "alen01",
             password = "Abcd1234!",
