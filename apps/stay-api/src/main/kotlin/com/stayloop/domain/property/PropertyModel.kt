@@ -20,6 +20,7 @@ import jakarta.persistence.FetchType
 import jakarta.persistence.Index
 import jakarta.persistence.JoinColumn
 import jakarta.persistence.OneToMany
+import jakarta.persistence.OrderBy
 import jakarta.persistence.Table
 
 /**
@@ -93,9 +94,11 @@ class PropertyModel internal constructor(
     /**
      * 이미지 갤러리 — Property AR 의 자식 entity.
      * 직접 노출하지 않고 `addImage` / `replaceMainImage` 등 메서드로만 변경.
+     * `@OrderBy("displayOrder ASC")` — DB 재조회 시 순서 결정성 보장 (Copilot #6 가드).
      */
     @OneToMany(cascade = [CascadeType.ALL], orphanRemoval = true, fetch = FetchType.LAZY)
     @JoinColumn(name = "property_id")
+    @OrderBy("displayOrder ASC")
     private val _images: MutableList<PropertyImageModel> = mutableListOf()
 
     val images: List<PropertyImageModel>
@@ -127,13 +130,13 @@ class PropertyModel internal constructor(
 
     /**
      * 갤러리에 이미지 추가. `isMain = true` 인 경우 기존 main 의 플래그를 해제.
+     * 자식 entity 의 `propertyId` 는 부모의 `@JoinColumn` 이 채운다 — 호출자가 전달하지 않는다.
      */
     fun addImage(imageUrl: String, altText: String? = null, displayOrder: Int = 0, isMain: Boolean = false): PropertyImageModel {
         if (isMain) {
             _images.forEach { it.unmarkAsMain() }
         }
         val image = PropertyImageModel.create(
-            propertyId = this.id,
             imageUrl = imageUrl,
             altText = altText,
             displayOrder = displayOrder,
@@ -148,16 +151,19 @@ class PropertyModel internal constructor(
 
     /**
      * 대표 이미지 교체. `mainImageUrl` 캐시 컬럼과 갤러리의 `is_main` 플래그를 함께 갱신 (`05 §2.0.3` 가드).
+     * **갤러리에 없는 URL 은 거절** — 캐시 컬럼과 갤러리의 단일 진실 원천 보호 (Copilot #4 가드).
      */
     fun replaceMainImage(imageUrl: String) {
         if (imageUrl.isBlank()) {
             throw CoreException(ErrorType.BAD_REQUEST, "대표 이미지 URL 은 비어 있을 수 없습니다.")
         }
-        _images.forEach { it.unmarkAsMain() }
         val target = _images.firstOrNull { it.imageUrl == imageUrl }
-        if (target != null) {
-            target.markAsMain()
-        }
+            ?: throw CoreException(
+                ErrorType.BAD_REQUEST,
+                "대표 이미지로 지정하려는 URL 이 갤러리에 없습니다: $imageUrl",
+            )
+        _images.forEach { it.unmarkAsMain() }
+        target.markAsMain()
         mainImageUrl = imageUrl
     }
 
