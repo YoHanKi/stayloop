@@ -40,6 +40,180 @@ class ReservationServiceTest {
         maxGuests = 4,
     )
 
+    @DisplayName("guestCount <= 0 이면 BAD_REQUEST — 부수효과(reserveOne) 이전에 거절 (verify-code §6 cheap input early guard).")
+    @Test
+    fun shouldReject_whenGuestCountIsZeroOrNegative_beforeAnyDecrement() {
+        val inventory = inventoryAt(LocalDate.of(2026, 5, 10), totalRooms = 5)
+        val rate = rateAt(LocalDate.of(2026, 5, 10), 100_000L)
+        val singleNight = StayPeriod(LocalDate.of(2026, 5, 10), LocalDate.of(2026, 5, 11))
+
+        assertThatThrownBy {
+            service.reserve(
+                userId = anyUser,
+                propertySnapshot = standardSnapshotProperty,
+                roomTypeSnapshot = standardSnapshotRoomType,
+                period = singleNight,
+                guestCount = 0,
+                guest = anyGuest,
+                inventories = listOf(inventory),
+                rates = listOf(rate),
+            )
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+        // 부수효과가 일어나지 않았는지 확인 — reservedRooms 불변
+        assertThat(inventory.reservedRooms).isEqualTo(0)
+    }
+
+    @DisplayName("inventories 일자가 중복(`[5/10, 5/10, 5/11]`)이면 BAD_REQUEST — set 비교 + size 페어 (verify-code §16-A).")
+    @Test
+    fun shouldReject_whenInventoriesContainDuplicateDate() {
+        val duplicated = listOf(
+            inventoryAt(LocalDate.of(2026, 5, 10), totalRooms = 5),
+            inventoryAt(LocalDate.of(2026, 5, 10), totalRooms = 5),
+            inventoryAt(LocalDate.of(2026, 5, 11), totalRooms = 5),
+        )
+        val rates = listOf(
+            rateAt(LocalDate.of(2026, 5, 10), 100_000L),
+            rateAt(LocalDate.of(2026, 5, 11), 110_000L),
+        )
+
+        assertThatThrownBy {
+            service.reserve(
+                userId = anyUser,
+                propertySnapshot = standardSnapshotProperty,
+                roomTypeSnapshot = standardSnapshotRoomType,
+                period = standardPeriod,
+                guestCount = 2,
+                guest = anyGuest,
+                inventories = duplicated,
+                rates = rates,
+            )
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
+
+    @DisplayName("rates 일자가 중복이면 BAD_REQUEST — 합산가 오류 차단.")
+    @Test
+    fun shouldReject_whenRatesContainDuplicateDate() {
+        val inventories = listOf(
+            inventoryAt(LocalDate.of(2026, 5, 10), totalRooms = 5),
+            inventoryAt(LocalDate.of(2026, 5, 11), totalRooms = 5),
+        )
+        // 5/10 중복 — set 비교만으로는 통과해도 size 가 다르므로 거절되어야 한다
+        val duplicatedRates = listOf(
+            rateAt(LocalDate.of(2026, 5, 10), 100_000L),
+            rateAt(LocalDate.of(2026, 5, 10), 110_000L),
+            rateAt(LocalDate.of(2026, 5, 11), 120_000L),
+        )
+
+        assertThatThrownBy {
+            service.reserve(
+                userId = anyUser,
+                propertySnapshot = standardSnapshotProperty,
+                roomTypeSnapshot = standardSnapshotRoomType,
+                period = standardPeriod,
+                guestCount = 2,
+                guest = anyGuest,
+                inventories = inventories,
+                rates = duplicatedRates,
+            )
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
+
+    @DisplayName("inventories 의 roomTypeId 가 예약 객실과 다르면 BAD_REQUEST — 잘못된 자원 차감 차단.")
+    @Test
+    fun shouldReject_whenInventoryRoomTypeIdMismatches() {
+        val wrongRoomType = listOf(
+            DailyRoomInventoryModel.create(roomTypeId = 99L, date = LocalDate.of(2026, 5, 10), totalRooms = 5),
+            DailyRoomInventoryModel.create(roomTypeId = 99L, date = LocalDate.of(2026, 5, 11), totalRooms = 5),
+        )
+        val rates = listOf(
+            rateAt(LocalDate.of(2026, 5, 10), 100_000L),
+            rateAt(LocalDate.of(2026, 5, 11), 110_000L),
+        )
+
+        assertThatThrownBy {
+            service.reserve(
+                userId = anyUser,
+                propertySnapshot = standardSnapshotProperty,
+                // standardSnapshotRoomType.roomTypeId = 11L
+                roomTypeSnapshot = standardSnapshotRoomType,
+                period = standardPeriod,
+                guestCount = 2,
+                guest = anyGuest,
+                inventories = wrongRoomType,
+                rates = rates,
+            )
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
+
+    @DisplayName("cancel — inventories 의 roomTypeId 가 reservation 과 다르면 BAD_REQUEST (잘못된 자원 복원 차단).")
+    @Test
+    fun shouldReject_cancelWithMismatchedInventoryRoomTypeId() {
+        val inventories = listOf(
+            inventoryAt(LocalDate.of(2026, 5, 10), totalRooms = 5),
+            inventoryAt(LocalDate.of(2026, 5, 11), totalRooms = 5),
+        )
+        val rates = listOf(
+            rateAt(LocalDate.of(2026, 5, 10), 100_000L),
+            rateAt(LocalDate.of(2026, 5, 11), 110_000L),
+        )
+        val (_, reservation) = service.reserve(
+            userId = anyUser,
+            propertySnapshot = standardSnapshotProperty,
+            roomTypeSnapshot = standardSnapshotRoomType,
+            period = standardPeriod,
+            guestCount = 2,
+            guest = anyGuest,
+            inventories = inventories,
+            rates = rates,
+        )
+        // 다른 roomTypeId 의 inventories 주입
+        val foreign = listOf(
+            DailyRoomInventoryModel.create(roomTypeId = 99L, date = LocalDate.of(2026, 5, 10), totalRooms = 5, reservedRooms = 1),
+            DailyRoomInventoryModel.create(roomTypeId = 99L, date = LocalDate.of(2026, 5, 11), totalRooms = 5, reservedRooms = 1),
+        )
+
+        assertThatThrownBy {
+            service.cancel(reservation, foreign, LocalDateTime.of(2026, 5, 1, 12, 0))
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+        // reservation 상태가 변하지 않았는지 — Strong Exception Safety
+        assertThat(reservation.cancelledAt).isNull()
+    }
+
+    @DisplayName("cancel — inventories 일자가 reservation.period 와 1:1 매칭 안되면 BAD_REQUEST.")
+    @Test
+    fun shouldReject_cancelWithMismatchedInventoryDates() {
+        val inventories = listOf(
+            inventoryAt(LocalDate.of(2026, 5, 10), totalRooms = 5),
+            inventoryAt(LocalDate.of(2026, 5, 11), totalRooms = 5),
+        )
+        val rates = listOf(
+            rateAt(LocalDate.of(2026, 5, 10), 100_000L),
+            rateAt(LocalDate.of(2026, 5, 11), 110_000L),
+        )
+        val (_, reservation) = service.reserve(
+            userId = anyUser,
+            propertySnapshot = standardSnapshotProperty,
+            roomTypeSnapshot = standardSnapshotRoomType,
+            period = standardPeriod,
+            guestCount = 2,
+            guest = anyGuest,
+            inventories = inventories,
+            rates = rates,
+        )
+        // 5/11 누락 inventories 주입
+        val partial = listOf(inventoryAt(LocalDate.of(2026, 5, 10), totalRooms = 5, reservedRooms = 1))
+
+        assertThatThrownBy {
+            service.cancel(reservation, partial, LocalDateTime.of(2026, 5, 1, 12, 0))
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
+
     @DisplayName("정상 reserve — inventory 가 차감되고, 합산가가 rates 합과 일치하며, status 는 PENDING.")
     @Test
     fun shouldReserveAndComputeTotal() {
