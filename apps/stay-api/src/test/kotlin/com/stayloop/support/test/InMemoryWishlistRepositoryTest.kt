@@ -1,6 +1,8 @@
 package com.stayloop.support.test
 
 import com.stayloop.domain.common.value.PageQuery
+import com.stayloop.domain.common.value.SortDirection
+import com.stayloop.domain.common.value.SortKey
 import com.stayloop.domain.user.UserModel
 import com.stayloop.domain.user.value.BirthDate
 import com.stayloop.domain.user.value.Email
@@ -98,12 +100,32 @@ class InMemoryWishlistRepositoryTest {
         assertThat(repository.findByUserId(unknown, PageQuery.of(page = 0, size = 10))).isEmpty()
     }
 
-    @DisplayName("사용자가 없는 LoginId 로 save 호출 시 NOT_FOUND — 쓰기는 사용자 부재가 명시적 오류.")
+    @DisplayName("사용자가 없는 LoginId 로 save 호출 시 NOT_FOUND — 쓰기는 사용자 부재가 명시적 오류, 메시지에 LoginId 가 포함되지 않는다.")
     @Test
-    fun shouldThrowNotFound_whenUserMissing_save() {
+    fun shouldThrowNotFound_whenUserMissing_save_withoutExposingLoginId() {
         assertThatThrownBy { repository.save(unknown, 1L, at(10, 0)) }
             .isInstanceOf(CoreException::class.java)
             .extracting("errorType").isEqualTo(ErrorType.NOT_FOUND)
+
+        // 메시지에 LoginId 값(`ghost99`) 이 노출되지 않아야 한다 — `customMessage` 가 응답으로 흘러가는 경로에서
+        // 식별자 노출을 차단 (verify-code §12 / §18).
+        assertThatThrownBy { repository.save(unknown, 1L, at(10, 0)) }
+            .hasMessageNotContaining(unknown.value)
+            .hasMessage("사용자가 존재하지 않습니다.")
+    }
+
+    @DisplayName("findByUserId 는 page.sort 가 비어있지 않으면 BAD_REQUEST 로 거절한다 — silent ignore 차단(§16-A).")
+    @Test
+    fun shouldRejectBadRequest_whenPageQuerySortIsNotEmpty() {
+        val pageWithSort = PageQuery.of(
+            page = 0,
+            size = 10,
+            sort = listOf(SortKey("wishedAt", SortDirection.ASC)),
+        )
+
+        assertThatThrownBy { repository.findByUserId(loginA, pageWithSort) }
+            .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
     }
 
     @DisplayName("사용자가 없는 LoginId 로 deleteBy 호출 시 noop — 삭제할 행 자체가 없으므로 예외 없음.")

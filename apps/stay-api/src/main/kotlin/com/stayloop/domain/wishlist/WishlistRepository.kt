@@ -40,7 +40,12 @@ interface WishlistRepository {
     fun deleteBy(userId: LoginId, propertyId: Long)
 
     /**
-     * 사용자의 찜 목록을 페이지 단위로 조회한다 — `wishedAt` 내림차순(최신순) 기본.
+     * 사용자의 찜 목록을 페이지 단위로 조회한다 — 정렬은 **`wishedAt` 내림차순(최신순) 고정**.
+     *
+     * **`page.sort` 가 비어있지 않으면 `BAD_REQUEST` 로 거절** — 본 도메인은 "최근 찜 순" 외 정렬 의미가 없고,
+     * 호출자 입력을 silent ignore 하면 정렬이 작동하지 않는 silent bug 가 된다 (verify-code §16-A).
+     * 운영 RepositoryImpl / InMemory 더블 양쪽 동일 정책 (§19-A).
+     *
      * 사용자 부재 시 빈 리스트.
      */
     fun findByUserId(userId: LoginId, page: PageQuery): List<WishlistModel>
