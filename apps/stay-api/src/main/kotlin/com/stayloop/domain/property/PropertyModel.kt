@@ -131,17 +131,22 @@ class PropertyModel internal constructor(
     /**
      * 갤러리에 이미지 추가. `isMain = true` 인 경우 기존 main 의 플래그를 해제.
      * 자식 entity 의 `propertyId` 는 부모의 `@JoinColumn` 이 채운다 — 호출자가 전달하지 않는다.
+     *
+     * **상태 변경 순서**: 검증/생성 → 기존 main 해제 → 컬렉션 추가 → 캐시 갱신.
+     * `PropertyImageModel.create()` 가 예외를 던지면 aggregate 상태가 변하지 않아야 함 (`verify-code §6` 가드).
      */
     fun addImage(imageUrl: String, altText: String? = null, displayOrder: Int = 0, isMain: Boolean = false): PropertyImageModel {
-        if (isMain) {
-            _images.forEach { it.unmarkAsMain() }
-        }
+        // 1) 입력 검증 + 자식 인스턴스 생성 — 실패 시 예외 (aggregate 상태 미변경)
         val image = PropertyImageModel.create(
             imageUrl = imageUrl,
             altText = altText,
             displayOrder = displayOrder,
             isMain = isMain,
         )
+        // 2) 검증 통과 후에야 기존 main 해제 + 컬렉션 추가
+        if (isMain) {
+            _images.forEach { it.unmarkAsMain() }
+        }
         _images.add(image)
         if (isMain) {
             mainImageUrl = imageUrl
