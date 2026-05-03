@@ -190,6 +190,17 @@ class PropertyModel internal constructor(
     companion object {
         const val MAIN_IMAGE_URL_MAX_LENGTH: Int = 500
 
+        /**
+         * 신규 Property 생성 진입점.
+         *
+         * **`mainImageUrl` 캐시 컬럼은 매개변수로 받지 않는다** — 대표 이미지는 반드시
+         * `addImage(isMain = true)` 또는 `replaceMainImage()` 를 통해서만 설정되어야
+         * 갤러리(`images`) ↔ `is_main` 플래그 ↔ `mainImageUrl` 캐시의 SSOT 가 유지된다.
+         * 갤러리에 없는 URL 이 캐시에만 들어가는 우회 경로를 차단하기 위함 (verify-code §5 가드).
+         *
+         * JPA hydration 은 internal constructor 가 처리 — 그 경로에서는 DB 가
+         * 갤러리/캐시의 일관성을 보장한 상태로 들어온다.
+         */
         fun create(
             name: Name,
             category: PropertyCategory,
@@ -197,7 +208,6 @@ class PropertyModel internal constructor(
             address: Address,
             amenities: Amenities = Amenities.EMPTY,
             policy: PropertyPolicy,
-            mainImageUrl: String? = null,
             starRating: StarRating? = null,
         ): PropertyModel = PropertyModel(
             name = name,
@@ -206,7 +216,7 @@ class PropertyModel internal constructor(
             address = address,
             amenities = amenities,
             policy = policy,
-            mainImageUrl = mainImageUrl,
+            mainImageUrl = null,
             starRating = starRating,
         )
     }
