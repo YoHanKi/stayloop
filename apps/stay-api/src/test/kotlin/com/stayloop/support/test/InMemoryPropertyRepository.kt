@@ -6,6 +6,8 @@ import com.stayloop.domain.common.value.PageResult
 import com.stayloop.domain.common.value.SortDirection
 import com.stayloop.domain.property.PropertyModel
 import com.stayloop.domain.property.PropertyRepository
+import com.stayloop.support.error.CoreException
+import com.stayloop.support.error.ErrorType
 
 class InMemoryPropertyRepository : PropertyRepository {
     private val store = mutableMapOf<Long, PropertyModel>()
@@ -22,8 +24,8 @@ class InMemoryPropertyRepository : PropertyRepository {
     override fun findById(id: Long): PropertyModel? = store[id]
 
     /**
-     * 도메인 어휘 정렬을 일부 지원: `wishCount`, `rating`, `name`. 그 외 키는 무시.
-     * Facade/검색 테스트 플래키 회피를 위해 대표 케이스만 안정적으로 동작.
+     * 도메인 어휘 정렬: `wishCount`, `rating`, `name`. **그 외 키는 BAD_REQUEST 로 거절** —
+     * 운영 RepositoryImpl 과 정책 일관 (Copilot #8 가드).
      */
     override fun findByCity(city: String, query: PageQuery): PageResult<PropertyModel> {
         val matched = store.values.filter { it.address.city == city }
@@ -46,7 +48,10 @@ class InMemoryPropertyRepository : PropertyRepository {
             "wishCount" -> { p -> p.wishCount }
             "rating" -> { p -> p.rating.value }
             "name" -> { p -> p.name.value }
-            else -> return list
+            else -> throw CoreException(
+                ErrorType.BAD_REQUEST,
+                "지원하지 않는 정렬 키입니다: ${first.property}",
+            )
         }
 
         @Suppress("UNCHECKED_CAST")
