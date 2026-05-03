@@ -1,6 +1,6 @@
 ---
 name: verify-architecture
-description:
+description: |
   Stayloop 기능 구현/리팩토링 직후, **verify-code 가 PASS 된 뒤에** 호출되어 아키텍처 정합성을 검수하는 게이트.
   계층 의존 방향(domain ← application ← interfaces.api / infrastructure), Aggregate 패키지 구성·명명 규약,
   트랜잭션 경계, Repository 인터페이스 위치, DTO/JPA 어노테이션 누출, 멀티모듈 경계를 점검한다.
