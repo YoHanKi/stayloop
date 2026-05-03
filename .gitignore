@@ -52,6 +52,13 @@ exp*
 
 docs/
 
+### per-feature PR drafts (로컬 작성용, 깃 추적 X) ###
+# `gh pr create --body-file` 로 GitHub 에 보내는 일회성 본문이라 git 추적 대상 아님.
+# CLAUDE.md 가 anchor 로 참조하는 표준 문서(user-architecture/pr.md, user/pr.md) 는 except.
+documents/feature/*/pr.md
+!documents/feature/user-architecture/pr.md
+!documents/feature/user/pr.md
+
 ### technical observation tests ###
 **/src/test/java/**/technical/
 **/src/test/java/**/benchmark
