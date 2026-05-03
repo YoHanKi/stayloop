@@ -2,6 +2,7 @@ package com.stayloop.domain.wishlist
 
 import com.stayloop.domain.common.value.PageQuery
 import com.stayloop.domain.user.value.LoginId
+import java.time.LocalDateTime
 
 /**
  * `Wishlist` 의 도메인 Repository 인터페이스. (`docs/design/03-class-diagram.md §3`, `docs/plan/week2-3.md §⑥`)
@@ -28,7 +29,7 @@ interface WishlistRepository {
      *
      * 멱등 처리(이미 찜된 경우 noop)는 호출자(`WishlistFacade`) 책임 — Repository 는 단순 쓰기만 수행.
      */
-    fun save(userId: LoginId, propertyId: Long, wishedAt: java.time.LocalDateTime): WishlistModel
+    fun save(userId: LoginId, propertyId: Long, wishedAt: LocalDateTime): WishlistModel
 
     /**
      * 자연키 `(userId, propertyId)` 의 찜 행을 삭제한다. 행이 없으면 noop.
