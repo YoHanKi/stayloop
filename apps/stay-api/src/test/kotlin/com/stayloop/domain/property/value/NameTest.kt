@@ -10,7 +10,7 @@ import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.ValueSource
 
 class NameTest {
-    @DisplayName("공백이거나 100자를 초과하면 BAD_REQUEST 로 거절된다.")
+    @DisplayName("공백이면 BAD_REQUEST 로 거절된다.")
     @ParameterizedTest
     @ValueSource(strings = ["", " ", "   "])
     fun shouldReject_whenBlank(value: String) {
