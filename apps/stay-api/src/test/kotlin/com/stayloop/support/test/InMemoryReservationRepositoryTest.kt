@@ -100,8 +100,6 @@ class InMemoryReservationRepositoryTest {
         checkOut: LocalDate = checkIn.plusDays(2),
     ): ReservationModel = ReservationModel.create(
         userId = userId,
-        propertyId = 7L,
-        roomTypeId = 11L,
         property = PropertySnapshot(
             propertyId = 7L,
             propertyName = "Stayloop 호텔",

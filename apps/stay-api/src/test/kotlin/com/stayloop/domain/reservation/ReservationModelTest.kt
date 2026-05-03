@@ -19,7 +19,7 @@ import java.time.LocalDateTime
 
 class ReservationModelTest {
 
-    @DisplayName("정상 생성 시 status 는 PENDING, cancelledAt 은 null 이며 모든 박제 필드가 노출된다.")
+    @DisplayName("정상 생성 시 status 는 PENDING, cancelledAt 은 null 이며 propertyId/roomTypeId 가 박제 VO 위임으로 노출된다.")
     @Test
     fun shouldCreateInPendingState() {
         val reservation = newReservation()
@@ -46,24 +46,6 @@ class ReservationModelTest {
     fun shouldReject_whenGuestCountIsZeroOrNegative() {
         assertThatThrownBy {
             newReservation(guestCount = 0, maxGuests = 4)
-        }.isInstanceOf(CoreException::class.java)
-            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
-    }
-
-    @DisplayName("propertyId 와 박제된 property.propertyId 가 다르면 BAD_REQUEST (FK ↔ 박제 정합).")
-    @Test
-    fun shouldReject_whenPropertyIdMismatchesSnapshot() {
-        assertThatThrownBy {
-            newReservation(propertyId = 7L, snapshotPropertyId = 999L)
-        }.isInstanceOf(CoreException::class.java)
-            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
-    }
-
-    @DisplayName("roomTypeId 와 박제된 roomType.roomTypeId 가 다르면 BAD_REQUEST (FK ↔ 박제 정합).")
-    @Test
-    fun shouldReject_whenRoomTypeIdMismatchesSnapshot() {
-        assertThatThrownBy {
-            newReservation(roomTypeId = 11L, snapshotRoomTypeId = 999L)
         }.isInstanceOf(CoreException::class.java)
             .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
     }
@@ -170,22 +152,18 @@ class ReservationModelTest {
     private fun newReservation(
         propertyId: Long = 7L,
         roomTypeId: Long = 11L,
-        snapshotPropertyId: Long = propertyId,
-        snapshotRoomTypeId: Long = roomTypeId,
         guestCount: Int = 2,
         maxGuests: Int = 4,
     ): ReservationModel = ReservationModel.create(
         userId = LoginId("alpha01"),
-        propertyId = propertyId,
-        roomTypeId = roomTypeId,
         property = PropertySnapshot(
-            propertyId = snapshotPropertyId,
+            propertyId = propertyId,
             propertyName = "Stayloop 호텔 강남점",
             propertyAddress = "서울특별시 강남구 테헤란로 1",
             propertyPolicy = "체크인 15시 / 체크아웃 11시",
         ),
         roomType = RoomTypeSnapshot(
-            roomTypeId = snapshotRoomTypeId,
+            roomTypeId = roomTypeId,
             roomTypeName = "디럭스 더블",
             maxGuests = maxGuests,
         ),

@@ -22,18 +22,18 @@ import java.time.LocalDateTime
 /**
  * 예약 Aggregate Root. (`docs/design/03-class-diagram.md §4`, `04-erd.md §3`, `docs/plan/week2-3.md §⑦`)
  *
- * 회원(`userId: LoginId`) × 객실 타입(`roomTypeId`) × 기간(`StayPeriod`) × 인원(`guestCount`) 의 예약을 표현.
+ * 회원(`userId: LoginId`) × 객실 타입 × 기간(`StayPeriod`) × 인원(`guestCount`) 의 예약을 표현.
  * Property / RoomType 의 *예약 시점 박제* (`PropertySnapshot` / `RoomTypeSnapshot`) 와 합산 가격(`Money`) 을 함께 보존.
  *
- * **propertyId 별도 보유** — `roomTypeId` 만으로 Property 추적이 가능하지만, ERD `reservations.property_id`
- * 컬럼이 별도로 존재하고 (`docs/design/04-erd.md §3`), 본인 자원 인가·검색·집계가 propertyId 단위로 일어나므로
- * 도메인 모델도 propertyId 를 명시적으로 보유한다 (`docs/design/03 §4` 결정).
+ * **`propertyId` / `roomTypeId` 는 박제 VO 위임** — ERD 의 `reservations.property_id` / `room_type_id` 컬럼은
+ * `@Embedded` 박제 VO 의 `@Column(name = "property_id")` / `@Column(name = "room_type_id")` 가 *유일 매핑* 이며,
+ * 모델 외부에는 `val propertyId: Long get() = property.propertyId` 형태의 *위임 프로퍼티* 로 노출. 동일 컬럼을
+ * 모델 본체와 박제 VO 가 동시에 매핑하면 Hibernate bootstrap 시 *컬럼 중복 매핑 예외* 가 발생하므로 SSOT 는
+ * 박제 VO 한 곳 (verify-code §6 — JPA 컬럼 중복 매핑 가드).
  *
  * 도메인 가드 (생성 시):
- * - `propertyId / roomTypeId` 양수
  * - `guestCount` 양수 + `guestCount <= roomType.maxGuests` (AC-5 — 인원 초과 거절)
- * - `propertyId == property.propertyId`, `roomTypeId == roomType.roomTypeId` — FK ↔ 박제 정합 (생성 시점에 호출자
- *   실수 차단)
+ * - `propertyId / roomTypeId` 양수성은 `PropertySnapshot` / `RoomTypeSnapshot` VO 의 init 이 자체 검증 (위임)
  * - `totalPrice` 음수 가드는 Money VO 책임
  *
  * 상태 메서드는 `ReservationStatus.canTransitTo(...)` 검증 후 변경한다 (Strong Exception Safety) — 검증 실패 시
@@ -44,8 +44,6 @@ import java.time.LocalDateTime
 @Table(name = "reservations")
 class ReservationModel internal constructor(
     userId: LoginId,
-    propertyId: Long,
-    roomTypeId: Long,
     property: PropertySnapshot,
     roomType: RoomTypeSnapshot,
     period: StayPeriod,
@@ -57,14 +55,6 @@ class ReservationModel internal constructor(
     @Embedded
     @AttributeOverride(name = "value", column = Column(name = "user_login_id", nullable = false, length = 20))
     var userId: LoginId = userId
-        protected set
-
-    @Column(name = "property_id", nullable = false)
-    var propertyId: Long = propertyId
-        protected set
-
-    @Column(name = "room_type_id", nullable = false)
-    var roomTypeId: Long = roomTypeId
         protected set
 
     @Embedded
@@ -101,13 +91,13 @@ class ReservationModel internal constructor(
     var cancelledAt: LocalDateTime? = null
         protected set
 
+    /** `property.propertyId` 위임 — 컬럼은 `PropertySnapshot.@Column(name="property_id")` 가 단독 매핑. */
+    val propertyId: Long get() = property.propertyId
+
+    /** `roomType.roomTypeId` 위임 — 컬럼은 `RoomTypeSnapshot.@Column(name="room_type_id")` 가 단독 매핑. */
+    val roomTypeId: Long get() = roomType.roomTypeId
+
     init {
-        if (propertyId <= 0L) {
-            throw CoreException(ErrorType.BAD_REQUEST, "propertyId 는 양수여야 합니다.")
-        }
-        if (roomTypeId <= 0L) {
-            throw CoreException(ErrorType.BAD_REQUEST, "roomTypeId 는 양수여야 합니다.")
-        }
         if (guestCount <= 0) {
             throw CoreException(ErrorType.BAD_REQUEST, "guestCount 는 양수여야 합니다.")
         }
@@ -115,18 +105,6 @@ class ReservationModel internal constructor(
             throw CoreException(
                 ErrorType.BAD_REQUEST,
                 "예약 인원($guestCount) 이 객실 최대 인원(${roomType.maxGuests}) 을 초과합니다.",
-            )
-        }
-        if (propertyId != property.propertyId) {
-            throw CoreException(
-                ErrorType.BAD_REQUEST,
-                "propertyId 와 박제된 property.propertyId 가 일치하지 않습니다.",
-            )
-        }
-        if (roomTypeId != roomType.roomTypeId) {
-            throw CoreException(
-                ErrorType.BAD_REQUEST,
-                "roomTypeId 와 박제된 roomType.roomTypeId 가 일치하지 않습니다.",
             )
         }
     }
@@ -183,8 +161,6 @@ class ReservationModel internal constructor(
 
         fun create(
             userId: LoginId,
-            propertyId: Long,
-            roomTypeId: Long,
             property: PropertySnapshot,
             roomType: RoomTypeSnapshot,
             period: StayPeriod,
@@ -193,8 +169,6 @@ class ReservationModel internal constructor(
             totalPrice: Money,
         ): ReservationModel = ReservationModel(
             userId = userId,
-            propertyId = propertyId,
-            roomTypeId = roomTypeId,
             property = property,
             roomType = roomType,
             period = period,
