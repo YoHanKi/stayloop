@@ -228,16 +228,35 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 | `try { ... } catch { return null }` 형태 | 호출자가 실패 인지 못함 |
 | **외부 입력 / 외부 라이브러리 예외 메시지(`e.message`)를 사용자 응답에 노출** | 시스템 내부 정보 / 원본 데이터 / 스택 정보가 외부로 누출 — 보안 위험 |
 | catch 시 메시지 일반화 없이 raw 메시지 그대로 wrap | `CoreException(INTERNAL_ERROR, "JSON 파싱: ${e.message}")` → 응답에 `path[0].field` 등 내부 구조 노출 |
+| **읽기 측만 try/catch, 쓰기 측은 raw 통과** | `convertToEntityAttribute` 는 cause 보존하면서 `convertToDatabaseColumn` 의 `writeValueAsString` 예외는 무가공 — 같은 컨버터 안에서 정책이 갈림 |
+| **로그에 raw payload 를 무제한 노출** (`log.warn("...dbData='{}'", dbData, e)`) | 길이/PII/시크릿 누설 — 로그 부피·보안 양쪽 함정 |
 
 **가드**:
 - **`CoreException(errorType, customMessage, cause)` 시그니처를 항상 사용** — `cause` 로 원인 보존.
 - **클라이언트 메시지는 일반화** ("정책 데이터 처리 실패"), **상세 원인은 로그로만** (`log.warn("...", e)`).
 - 외부 라이브러리 예외(`Jackson`, `JDBC`, `Redis`) 의 메시지는 `e.message` 를 customMessage 에 넣지 않는다. `cause` 로 보존하고 로그에서 추적.
+- **read 측이 try/catch 라면 write 측도 동일 정책으로 감싼다** — Jackson 의 `writeValueAsString` 도 `JsonProcessingException` 을 던질 수 있다. 한 컨버터 안에서 한 쪽만 감싸면 비대칭 (Copilot 3차 가드).
+- **로그에 들어가는 raw payload 는 길이 + 프리뷰만**. 예: `log.warn("X 역직렬화 실패. length={}, preview='{}'", dbData.length, dbData.take(80), e)`. PREVIEW_LIMIT 은 `private const`.
 
 ```kotlin
-} catch (e: Exception) {
-    log.warn("X 데이터 처리 실패. dbData='{}'", dbData, e)  // 상세는 로그
-    throw CoreException(ErrorType.INTERNAL_ERROR, "X 데이터 처리 실패", cause = e)  // 응답은 일반 메시지
+override fun convertToDatabaseColumn(attribute: T?): String {
+    if (attribute == null) throw CoreException(ErrorType.INTERNAL_ERROR, "X 데이터 처리 실패")
+    return try {
+        OBJECT_MAPPER.writeValueAsString(attribute)
+    } catch (e: Exception) {
+        log.warn("X JSON 직렬화 실패.", e)
+        throw CoreException(ErrorType.INTERNAL_ERROR, "X 데이터 처리 실패", cause = e)
+    }
+}
+
+override fun convertToEntityAttribute(dbData: String?): T {
+    if (dbData.isNullOrBlank()) throw CoreException(ErrorType.INTERNAL_ERROR, "X 데이터 처리 실패")
+    return try {
+        OBJECT_MAPPER.readValue(dbData)
+    } catch (e: Exception) {
+        log.warn("X JSON 역직렬화 실패. length={}, preview='{}'", dbData.length, dbData.take(PREVIEW_LIMIT), e)
+        throw CoreException(ErrorType.INTERNAL_ERROR, "X 데이터 처리 실패", cause = e)
+    }
 }
 ```
 
@@ -378,6 +397,47 @@ private fun toSpringSort(keys: List<SortKey>): Sort = ...
 
 ---
 
+### 1️⃣9️⃣-A 테스트 더블 ↔ 운영 동작 동치성 (Production-Test Parity)
+
+테스트용 InMemory 구현은 **운영 Repository 와 동일한 의미론** 을 따라야 한다. 갈리면 회귀가 마스킹된다.
+
+| 확인 | 위반 예 |
+|---|---|
+| 운영은 다중 키 정렬 지원, **테스트 더블은 첫 키만 적용** | 다중 키 회귀 발생 시 단위 테스트는 통과 |
+| 운영은 빈 컬렉션 입력에 short-circuit, 테스트 더블은 일반 경로 | 동작 차이가 단위 테스트에 안 잡힘 |
+| 운영은 정렬 키 화이트리스트로 거절, **테스트 더블은 fallback 으로 통과** | 의도치 않은 키가 단위 테스트에서만 통과 (Copilot #8 의 정확한 함정) |
+| 운영의 페이지네이션 경계(예: empty page, last page partial) 가 테스트 더블에서 다르게 처리 | 응답 포맷 회귀 |
+| 운영의 예외 정책(`BAD_REQUEST` vs `INTERNAL_ERROR`) 이 테스트 더블에서 다른 ErrorType | 컨트롤러 매핑 회귀 |
+
+**가드**: 테스트 더블의 분기 의미론(정렬, 화이트리스트, null 정책, 예외 매핑)은 **운영 코드에서 그대로 카피해 검증** 한다. "테스트 더블이라 단순화" 는 결함이 아니라 **회귀 사각지대**.
+
+```kotlin
+// ✗ 안 좋음 — 운영은 다중 키, 더블은 first 만
+val first = query.sort.first()
+list.sortedBy { keySelector(first.property)(it) }
+
+// ✓ 좋음 — 운영과 동일하게 fold/then 으로 합성
+query.sort.map { comparatorFor(it.property, it.direction) }
+    .reduce { acc, next -> acc.then(next) }
+```
+
+---
+
+### 1️⃣9️⃣-B 테스트 명세성 (DisplayName ↔ 실제 검증 범위)
+
+`@DisplayName` 은 테스트의 **명세 문서** 다. 실제 검증 범위와 어긋나면 명세가 거짓말한다.
+
+| 확인 | 위반 예 |
+|---|---|
+| DisplayName 이 "공백이거나 100자 초과면" 인데 `@ValueSource` 는 공백만 | 100자 케이스 검증이 누락됐는지 알기 어려움 (Copilot 3차 지적) |
+| DisplayName 이 "정상/실패 모두" 인데 정상만 검증 | 실패 회귀가 안 잡힘 |
+| 한 `@Test` 안에서 두 가지 동작을 검증하는데 이름은 한 가지만 | given/when/then 분해 신호 |
+| 한국어 자연어와 코드 동작이 시제·주체가 어긋남 (수동/능동, 거절/허용) | 명세 신뢰 저하 |
+
+**가드**: DisplayName 은 *실제로 검증되는 케이스만* 적는다. 추가 케이스는 별도 `@Test` 또는 `@ParameterizedTest` 로 분리하고 각각 자기 DisplayName 을 가진다. (verify-tests 게이트의 명세성 점검과 한 쌍 — verify-code 단계에서도 한 번 더 거른다.)
+
+---
+
 ### 2️⃣0️⃣ 회귀 방지 / 테스트 시나리오 권고
 
 각 항목에서 **위반이 발견되면**, 보완 코드와 함께 **회귀 방지 테스트** 도 권고한다.
@@ -391,6 +451,8 @@ verify-tests 게이트가 그 테스트를 강제 — 두 게이트는 한 쌍.
 - "`RoomTypeModel.create(propertyId = 0)` 거절" 테스트
 - "`@Transactional` self-invocation 검출" 통합 테스트
 - "현재 시각 의존 로직의 `Clock` 고정 단위 테스트"
+- "**다중 sort key** 적용 — 1차 키 동률일 때 2차 키로 정렬" 운영/InMemory 동치 테스트
+- "**Converter 직렬화 측 실패** — `writeValueAsString` 가 던지는 케이스에서 `INTERNAL_ERROR` + cause 보존" 테스트
 
 ---
 
