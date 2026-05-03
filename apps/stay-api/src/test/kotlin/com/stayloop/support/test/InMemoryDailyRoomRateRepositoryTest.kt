@@ -11,18 +11,19 @@ class InMemoryDailyRoomRateRepositoryTest {
     private val repository = InMemoryDailyRoomRateRepository()
     private val roomTypeId = 1L
 
-    @DisplayName("findAllInRange 는 반-닫힌 구간 [from, to) 로 동작한다 — 체크아웃 당일 제외와 정합.")
+    @DisplayName("findAllInRange 는 반-닫힌 구간 [from, to) 로 동작하고, 입력 순서와 무관하게 date ASC 로 정렬된 결과를 반환한다.")
     @Test
-    fun shouldReturnHalfOpenRange() {
+    fun shouldReturnHalfOpenRange_sortedByDateAsc_regardlessOfInsertOrder() {
+        // 입력은 일부러 날짜 역순/뒤섞인 순서 — `sortedBy` 가 빠지면 containsExactly 가 실패한다.
         repository.saveAll(
             listOf(
-                DailyRoomRateModel.create(roomTypeId, LocalDate.of(2026, 5, 10), Money.of(100_000L)),
                 DailyRoomRateModel.create(roomTypeId, LocalDate.of(2026, 5, 11), Money.of(110_000L)),
                 DailyRoomRateModel.create(roomTypeId, LocalDate.of(2026, 5, 12), Money.of(120_000L)),
+                DailyRoomRateModel.create(roomTypeId, LocalDate.of(2026, 5, 10), Money.of(100_000L)),
             ),
         )
 
-        // [5/10, 5/12) — 5/10, 5/11 두 일자만 포함
+        // [5/10, 5/12) — 5/10, 5/11 두 일자만, 그리고 ASC 순서로 노출되어야 한다.
         val result = repository.findAllInRange(roomTypeId, LocalDate.of(2026, 5, 10), LocalDate.of(2026, 5, 12))
 
         assertThat(result).extracting("date")

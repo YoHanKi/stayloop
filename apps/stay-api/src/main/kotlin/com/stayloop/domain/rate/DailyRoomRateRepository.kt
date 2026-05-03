@@ -22,7 +22,9 @@ interface DailyRoomRateRepository {
     fun findAllInRange(roomTypeId: Long, from: LocalDate, to: LocalDate): List<DailyRoomRateModel>
 
     /**
-     * 다건 저장. 어드민 일괄 등록 / Reservation Facade 의 합산 후 영속화에 사용.
+     * 다건 저장 — 어드민의 일괄 등록 (한 시즌의 일자별 요금을 한 번에 등록하는 등) 용도.
+     * `ReservationPriceCalculator` 는 합산 결과 `Money` 만 반환하고 요금 행을 갱신하지 않으므로,
+     * 예약 흐름은 본 메서드를 호출하지 않는다.
      */
     fun saveAll(rates: Collection<DailyRoomRateModel>): List<DailyRoomRateModel>
 
