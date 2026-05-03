@@ -16,6 +16,9 @@ import org.slf4j.LoggerFactory
  *
  * `properties.policy` 컬럼은 NOT NULL — null 입력은 즉시 `INTERNAL_ERROR` 로 거절.
  * **외부 응답에는 일반화된 메시지만**, Jackson 예외 상세는 로그로 분리. `cause` 로 원인 보존 (Copilot #3, #9 가드).
+ *
+ * **직렬화·역직렬화 양 측 모두** Jackson 예외를 잡아 통일된 정책으로 래핑하고 (Copilot 3차 가드),
+ * 로그에는 raw `dbData` 대신 길이 + 프리뷰만 남겨 부피·민감정보 노출을 줄인다.
  */
 @Converter(autoApply = true)
 class PropertyPolicyConverter : AttributeConverter<PropertyPolicy, String> {
@@ -23,7 +26,12 @@ class PropertyPolicyConverter : AttributeConverter<PropertyPolicy, String> {
         if (attribute == null) {
             throw CoreException(ErrorType.INTERNAL_ERROR, "정책 데이터 처리 실패")
         }
-        return OBJECT_MAPPER.writeValueAsString(attribute)
+        return try {
+            OBJECT_MAPPER.writeValueAsString(attribute)
+        } catch (e: Exception) {
+            log.warn("PropertyPolicy JSON 직렬화 실패.", e)
+            throw CoreException(ErrorType.INTERNAL_ERROR, "정책 데이터 처리 실패", cause = e)
+        }
     }
 
     override fun convertToEntityAttribute(dbData: String?): PropertyPolicy {
@@ -33,12 +41,13 @@ class PropertyPolicyConverter : AttributeConverter<PropertyPolicy, String> {
         return try {
             OBJECT_MAPPER.readValue(dbData)
         } catch (e: Exception) {
-            log.warn("PropertyPolicy JSON 역직렬화 실패. dbData='{}'", dbData, e)
+            log.warn("PropertyPolicy JSON 역직렬화 실패. length={}, preview='{}'", dbData.length, dbData.take(PREVIEW_LIMIT), e)
             throw CoreException(ErrorType.INTERNAL_ERROR, "정책 데이터 처리 실패", cause = e)
         }
     }
 
     companion object {
+        private const val PREVIEW_LIMIT = 80
         private val log = LoggerFactory.getLogger(PropertyPolicyConverter::class.java)
         private val OBJECT_MAPPER: ObjectMapper = jacksonObjectMapper().findAndRegisterModules()
     }
