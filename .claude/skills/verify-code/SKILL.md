@@ -236,17 +236,25 @@ Grep "^import io\.lettuce\.|^import redis\." path=apps/stay-api/src/main/kotlin/
 | 상태 전이가 `canTransitTo` 검증 없이 직접 set | `status = CANCELLED` 직접 대입 |
 | Map / Set 컬렉션 입력의 키 / 값 nullable 검증 누락 | `Map<K, V>` 의 V 가 null 통과 |
 | **상태 변경 → 검증 순서** — 변경을 먼저 하고 검증이 뒤에 오면 예외 시 부분 변경이 영속화 | `unmarkAsMain()` × N 후에 `create()` 가 예외 → main 플래그 사라짐 |
+| **`@Embedded VO` 와 외부 entity 가 같은 컬럼명 매핑 (`@Column(name="X")`)** | `@Embedded property: PropertySnapshot` 의 `propertyId @Column(name="property_id")` + 외부 `var propertyId @Column(name="property_id")` → Hibernate bootstrap **컬럼 중복 매핑 예외**. 단위 테스트는 통과 (JPA 부트스트랩 미수반) — `@DataJpaTest` / 풀 컨텍스트 시점에 폭발 |
+| **cheap input 가드가 부수효과 *후* 에 발동** | Service 가 외부 자원(`inventories.forEach { reserveOne() }`)을 먼저 변경하고 *그 다음* `ReservationModel.create()` 가 `guestCount <= 0` 거절 — Facade TX 가 없거나 호출자가 예외를 잡으면 부분 변경 잔존. 검증 순서 위반의 강화판 |
+| **호출자 주입 컬렉션 ↔ Aggregate 정합 가드 부재** | `cancel(reservation, inventories)` 에서 inventories 의 roomTypeId / dates 가 reservation 과 일치하는지 검증 안 함 → 잘못된 자원 복원 가능 |
 
 **가드**:
 - `init { require(...) }` 또는 `if (...) throw CoreException(ErrorType.X, "...")`. DB 제약은 *마지막* 방어선.
 - **컬럼 length ↔ 도메인 가드 일관성**: `@Column(length = N)` 가 있는 모든 String 필드에 대응하는 `init { if (value.length > N) throw ... }` 가 있어야 한다. 두 N 은 *같은* `companion object` 의 `const val MAX_LENGTH` 로 묶어 한 곳에서 관리. `Name.kt` / `Address.kt` / `PropertyImageModel.kt` 가 정렬 패턴.
 - 캐시 컬럼(역정규화) 도 동일 길이 가드 — 원본만 가드하고 캐시 setter 를 우회하면 위반 (verify-code 회귀 사각지대).
 - **상태 변경 메서드의 순서**: 검증·생성 먼저, 상태 변경은 통과 후에. Aggregate 메서드가 도중에 예외를 던져도 객체는 일관된 상태로 남아야 함 (Strong Exception Safety / Copilot 패턴).
+- **JPA 컬럼 중복 매핑 방지**: 한 entity 내에서 동일 `@Column(name = "X")` 가 두 곳에서 매핑되면 Hibernate bootstrap 시 폭발. 박제 VO (`@Embedded`) 가 FK 컬럼을 들고 있으면 외부 entity 는 *위임 프로퍼티* (`val propertyId: Long get() = property.propertyId`) 로 노출하고 자체 `@Column` 매핑하지 않는다. 다른 해결책: `insertable=false, updatable=false` 또는 `@AttributeOverride` — 다만 SSOT 가 흐려지므로 **위임 패턴이 1순위**.
+- **cheap input early guard**: 부수효과 (외부 자원 mutation, 상태 전이, 영속화) *이전* 에 *비싸지 않은* 입력 검증 (`> 0`, `not blank`, `length <= N`) 을 끝낸다. Service / Facade 의 메서드 시작 직후 검증을 모아두는 패턴 — Strong Exception Safety 의 service-level 강화.
+- **외부 주입 컬렉션 일관성**: Service 가 호출자로부터 entity / VO 컬렉션을 받을 때, *Aggregate Root 가 보유한 식별자* (예: `reservation.roomTypeId`, `reservation.period.datesToReserve()`) 와 일치하는지 가드. mutate (`reserveOne()` / `releaseOne()`) 이전에. 호출자 실수로 다른 자원을 변경하지 않게.
 
 **점검 명령** (이 가드 누락 일괄 검출):
 ```
 Grep "@Column.*length\s*=\s*\d+" path=apps/.../main → 모든 length 컬럼 추출
 → 같은 파일에 `length >` 가드가 있는지 대조
+
+Grep "@Column\(name\s*=\s*\"" path=apps/.../main → 같은 entity 내 동일 컬럼명이 두 곳에 등장하는지 횡단
 ```
 
 ---
@@ -444,6 +452,8 @@ override fun convertToEntityAttribute(dbData: String?): T {
 | 운영 RepositoryImpl 과 InMemory 더블의 미등록 키 정책이 다름 | 한쪽은 무시, 한쪽은 실패 — 테스트가 운영을 신뢰할 수 없음 |
 | 외부 입력 enum 매칭이 `valueOf` 직접 (예외 핸들링 없음) | `IllegalArgumentException` 이 500 으로 |
 | **외부 입력을 받지만 조용히 무시 (silent ignore)** — 정렬 / 필터 / 페이징 / 검색 옵션 등 | `findByX(query: PageQuery)` 가 `query.sort` 를 받아놓고 항상 고정 정렬을 적용하면, 호출자는 자기 sort 가 작동하지 않는 걸 깨닫지 못함. 디버깅 시간만 늘어나는 silent bug. **고정 정책이면 sort 가 비어있지 않을 때 BAD_REQUEST 거절**, 아니면 화이트리스트 + 변환. 받지 않을 거면 시그니처에서 `PageQuery.sort` 를 못 받게 별도 타입으로 분리. |
+| **`set(A) == set(B)` 만으로 list 동치 비교** — list 의 *중복* 을 못 잡음 | `inventories.map{date}.toSet() == expectedDates` 만 비교 시 `[5/10, 5/10, 5/11]` 이 `{5/10, 5/11}` 과 동일 set 으로 통과 → 같은 일자 자원이 두 번 mutate. **size + set 페어** 가 1:1 매칭의 최소 가드 (`list.size == set.size && list.toSet() == expected`). 1:1 매칭이 본질이면 `groupBy{date}.values.all{it.size==1}` 까지 가는 것도 검토 |
+| **외부 주입 컬렉션이 Aggregate Root 의 식별자와 일치하는지 가드 부재** | `cancel(reservation, inventories)` / `reserve(..., inventories, rates)` 에서 `inventory.roomTypeId == roomTypeSnapshot.roomTypeId` 검증 누락 → 호출자 실수로 다른 객실의 inventory 를 주입해도 통과 → 잘못된 자원 mutate. mutate (`reserveOne()` / `releaseOne()`) **이전** 에 식별자 가드를 둔다 |
 
 **가드**:
 - **화이트리스트 + BAD_REQUEST 거절** — 미등록 키는 도메인이 받지 않는다. 운영 / 테스트 양쪽 동일 정책.
@@ -684,8 +694,12 @@ P0 위반 1건도 FAIL. P1 / P2 는 누적 정도와 영향 범위로 판단.
 2. **Read-then-Write 의 SELECT 중복** (`existsBy → delete`, `findById → save` 등) — 운영 부하 P1. 단일 쿼리로 통합.
 3. **외부 입력의 silent ignore** (`PageQuery.sort` 무시 등) — 호출자 오용 가림 P1. 거절 또는 화이트리스트.
 4. **운영-테스트 더블 정책 비대칭** — 둘이 다르게 동작하면 회귀 사각지대 P1, 같은 결함도 양쪽에서 동시 fix.
+5. **JPA 컬럼 중복 매핑** (`@Embedded VO @Column(name="X")` + 외부 entity 의 `@Column(name="X")`) — 단위 테스트는 통과하지만 풀 컨텍스트 / `@DataJpaTest` 시점에 폭발 P0. 단위 테스트만으로는 발견 불가하므로 `@Column(name=...)` 횡단 grep 으로 entity 별 충돌 사전 감지.
+6. **부수효과 이전 cheap input guard 누락** — 외부 자원 mutation (`reserveOne()` / `releaseOne()` / `save()`) 이전에 `> 0` / `not blank` 같은 비싸지 않은 검증을 끝내지 않으면 부분 변경 시점이 발생 P1. Strong Exception Safety 의 service-level 강화.
+7. **외부 주입 컬렉션 ↔ Aggregate 식별자 가드 부재** (`cancel(reservation, inventories)` 등) — 호출자 실수로 다른 자원을 mutate 하는 정합성 오류 P1. mutate 이전 가드 + 단위 테스트로 회귀 방지.
+8. **`set(A) == set(B)` 단독 비교의 중복 사각지대** — list 의 1:1 매칭이 본질이면 `size + set` 페어 P1.
 
-위 4가지를 P2 로 보류하려면 **명시적 사유** ("4주차 동시성 영역", "별도 인프라 라운드" 같은 *일반화 가능한 이유*) 가 PR 본문에 박혀야 한다. "본 PR scope 외" 같은 모호한 사유로 미루면 다음 라운드에 외부 리뷰로 다시 잡힘.
+위 8가지를 P2 로 보류하려면 **명시적 사유** ("4주차 동시성 영역", "별도 인프라 라운드" 같은 *일반화 가능한 이유*) 가 PR 본문에 박혀야 한다. "본 PR scope 외" 같은 모호한 사유로 미루면 다음 라운드에 외부 리뷰로 다시 잡힘.
 
 ---
 
