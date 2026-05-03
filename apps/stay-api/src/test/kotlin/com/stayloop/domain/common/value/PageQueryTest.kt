@@ -56,4 +56,16 @@ class PageQueryTest {
         assertThat(PageQuery.of(page = 0, size = PageQuery.MAX_PAGE_SIZE + 999).size)
             .isEqualTo(PageQuery.MAX_PAGE_SIZE)
     }
+
+    @DisplayName("page * size 가 Int 한계를 넘으면 BAD_REQUEST 로 거절된다 — overflow 차단.")
+    @Test
+    fun shouldReject_whenPageTimesSizeOverflowsInt() {
+        // page = Int.MAX_VALUE / size 까지는 통과, +1 이면 거절
+        val safePage = Int.MAX_VALUE / 100
+        assertThat(PageQuery(page = safePage, size = 100).offset).isEqualTo(safePage * 100)
+
+        assertThatThrownBy { PageQuery(page = safePage + 1, size = 100) }
+            .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
 }
