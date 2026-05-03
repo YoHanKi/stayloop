@@ -6,7 +6,6 @@ import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.Id
 import jakarta.persistence.IdClass
-import jakarta.persistence.Index
 import jakarta.persistence.Table
 import java.time.LocalDate
 
@@ -24,12 +23,14 @@ import java.time.LocalDate
  * - `releaseOne()` 은 `reservedRooms > 0` 일 때만 (음수 진입 차단)
  *
  * DB CHECK 제약(`total_rooms > 0`, `reserved_rooms BETWEEN 0 AND total`) 은 **마지막 방어선** — 도메인이 1차.
+ *
+ * **인덱스 정책**: `@IdClass` 의 PK `(roomTypeId, date)` 자체가 동일 컬럼/순서의 인덱스를 제공한다.
+ * `@Table(indexes = ...)` 로 같은 키를 한 번 더 명시하면 보조 인덱스가 중복 생성되어 쓰기 amplification /
+ * 스토리지 비용이 증가한다 (verify-code §17). `date` 단독 / `roomTypeId DESC` 같은 *다른* 접근 패턴이
+ * 등장하기 전까지 별도 인덱스는 두지 않는다.
  */
 @Entity
-@Table(
-    name = "daily_room_inventories",
-    indexes = [Index(name = "idx_inventory_room_type_date", columnList = "room_type_id, date")],
-)
+@Table(name = "daily_room_inventories")
 @IdClass(DailyRoomInventoryId::class)
 class DailyRoomInventoryModel internal constructor(
     roomTypeId: Long,
