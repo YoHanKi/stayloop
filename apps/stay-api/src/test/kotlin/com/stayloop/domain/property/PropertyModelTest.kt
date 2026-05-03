@@ -111,4 +111,18 @@ class PropertyModelTest {
             .isInstanceOf(CoreException::class.java)
             .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
     }
+
+    @DisplayName("replaceMainImage() 갤러리에 없는 URL 은 BAD_REQUEST 로 거절하고 상태가 변하지 않는다.")
+    @Test
+    fun shouldReject_replaceMainImageWithUnknownUrl() {
+        val property = newProperty()
+        property.addImage("https://cdn/p/1.jpg", isMain = true)
+
+        assertThatThrownBy { property.replaceMainImage("https://cdn/unknown.jpg") }
+            .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+
+        assertThat(property.mainImageUrl).isEqualTo("https://cdn/p/1.jpg")
+        assertThat(property.images.single().isMain).isTrue()
+    }
 }

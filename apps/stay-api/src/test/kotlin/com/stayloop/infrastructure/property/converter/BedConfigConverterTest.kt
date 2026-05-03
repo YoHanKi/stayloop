@@ -3,6 +3,7 @@ package com.stayloop.infrastructure.property.converter
 import com.stayloop.domain.property.value.BedConfig
 import com.stayloop.domain.property.value.BedType
 import com.stayloop.support.error.CoreException
+import com.stayloop.support.error.ErrorType
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.DisplayName
@@ -22,7 +23,15 @@ class BedConfigConverterTest {
         assertThat(restored).isEqualTo(original)
     }
 
-    @DisplayName("null / 빈 문자열은 INTERNAL_ERROR 로 거절된다 — BedConfig 는 NOT NULL 컬럼.")
+    @DisplayName("attribute 가 null 이면 INTERNAL_ERROR 로 거절된다 — 빈 맵 직렬화 회피.")
+    @Test
+    fun shouldReject_whenAttributeIsNull() {
+        assertThatThrownBy { converter.convertToDatabaseColumn(null) }
+            .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.INTERNAL_ERROR)
+    }
+
+    @DisplayName("null / 빈 문자열은 INTERNAL_ERROR 로 거절된다.")
     @Test
     fun shouldReject_whenNullOrBlank() {
         assertThatThrownBy { converter.convertToEntityAttribute(null) }

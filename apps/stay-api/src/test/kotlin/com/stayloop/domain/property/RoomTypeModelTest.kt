@@ -20,6 +20,32 @@ class RoomTypeModelTest {
         bedConfig = BedConfig.of(BedType.DOUBLE to 1),
     )
 
+    @DisplayName("propertyId 가 0 이하이면 BAD_REQUEST 로 거절된다 — 영속화되지 않은 Property 참조 차단.")
+    @Test
+    fun shouldReject_whenPropertyIdIsZeroOrNegative() {
+        assertThatThrownBy {
+            RoomTypeModel.create(
+                propertyId = 0L,
+                name = Name("스탠다드 더블"),
+                guestCount = GuestCount(base = 2, max = 2),
+                bedConfig = BedConfig.of(BedType.DOUBLE to 1),
+            )
+        }
+            .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+
+        assertThatThrownBy {
+            RoomTypeModel.create(
+                propertyId = -1L,
+                name = Name("스탠다드 더블"),
+                guestCount = GuestCount(base = 2, max = 2),
+                bedConfig = BedConfig.of(BedType.DOUBLE to 1),
+            )
+        }
+            .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
+
     @DisplayName("checkGuestCount(0) 은 BAD_REQUEST 로 거절된다.")
     @Test
     fun shouldReject_whenZero() {

@@ -3,7 +3,10 @@ package com.stayloop.infrastructure.property.converter
 import com.stayloop.domain.property.value.CancellationPolicy
 import com.stayloop.domain.property.value.CancellationType
 import com.stayloop.domain.property.value.PropertyPolicy
+import com.stayloop.support.error.CoreException
+import com.stayloop.support.error.ErrorType
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import java.time.LocalTime
@@ -28,10 +31,21 @@ class PropertyPolicyConverterTest {
         assertThat(restored).isEqualTo(original)
     }
 
-    @DisplayName("null 은 그대로 null 로 처리한다.")
+    @DisplayName("attribute 가 null 이면 INTERNAL_ERROR 로 거절된다 — NOT NULL 컬럼 일관성.")
     @Test
-    fun shouldHandleNull() {
-        assertThat(converter.convertToDatabaseColumn(null)).isNull()
-        assertThat(converter.convertToEntityAttribute(null)).isNull()
+    fun shouldReject_whenAttributeIsNull() {
+        assertThatThrownBy { converter.convertToDatabaseColumn(null) }
+            .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.INTERNAL_ERROR)
+    }
+
+    @DisplayName("dbData 가 null/blank 이면 INTERNAL_ERROR 로 거절된다.")
+    @Test
+    fun shouldReject_whenDbDataIsNullOrBlank() {
+        assertThatThrownBy { converter.convertToEntityAttribute(null) }
+            .isInstanceOf(CoreException::class.java)
+
+        assertThatThrownBy { converter.convertToEntityAttribute("") }
+            .isInstanceOf(CoreException::class.java)
     }
 }
