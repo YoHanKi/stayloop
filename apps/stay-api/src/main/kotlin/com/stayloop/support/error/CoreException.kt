@@ -7,7 +7,7 @@ package com.stayloop.support.error
  * @property customMessage **클라이언트에 노출되는 메시지**. 외부 입력에 영향받는 상세
  *                          (Jackson 파싱 실패 메시지 등) 을 그대로 넣지 말 것 — 정보 노출 위험.
  *                          내부 디버깅 정보는 `cause` 로 보존하고 로그에서 확인.
- * @property cause        원인 예외. 스택트레이스/로그 추적을 위해 보존.
+ * @param cause           원인 예외 (생성자 매개변수 — `val/var` 없음). 부모 `Throwable.cause` 로 전달.
  */
 class CoreException(
     val errorType: ErrorType,
