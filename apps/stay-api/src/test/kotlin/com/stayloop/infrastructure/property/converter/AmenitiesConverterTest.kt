@@ -40,6 +40,7 @@ class AmenitiesConverterTest {
 
         assertThatThrownBy { converter.convertToEntityAttribute("") }
             .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.INTERNAL_ERROR)
     }
 
     @DisplayName("역직렬화 실패 시 cause 가 보존된다.")

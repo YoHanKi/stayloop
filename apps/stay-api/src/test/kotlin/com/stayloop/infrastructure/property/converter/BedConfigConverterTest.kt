@@ -36,8 +36,10 @@ class BedConfigConverterTest {
     fun shouldReject_whenNullOrBlank() {
         assertThatThrownBy { converter.convertToEntityAttribute(null) }
             .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.INTERNAL_ERROR)
 
         assertThatThrownBy { converter.convertToEntityAttribute("") }
             .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.INTERNAL_ERROR)
     }
 }

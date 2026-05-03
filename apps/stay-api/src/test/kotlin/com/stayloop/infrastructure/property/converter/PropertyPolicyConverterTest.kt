@@ -44,8 +44,10 @@ class PropertyPolicyConverterTest {
     fun shouldReject_whenDbDataIsNullOrBlank() {
         assertThatThrownBy { converter.convertToEntityAttribute(null) }
             .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.INTERNAL_ERROR)
 
         assertThatThrownBy { converter.convertToEntityAttribute("") }
             .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.INTERNAL_ERROR)
     }
 }
