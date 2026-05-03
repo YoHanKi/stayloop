@@ -103,15 +103,13 @@ class InMemoryWishlistRepositoryTest {
     @DisplayName("사용자가 없는 LoginId 로 save 호출 시 NOT_FOUND — 쓰기는 사용자 부재가 명시적 오류, 메시지에 LoginId 가 포함되지 않는다.")
     @Test
     fun shouldThrowNotFound_whenUserMissing_save_withoutExposingLoginId() {
+        // 단일 assertThatThrownBy 에서 (1) errorType (2) 메시지 일반화 (3) LoginId 미노출 모두 검증 —
+        // 두 블록으로 나누면 어설션 강도 비대칭이 회귀 사각지대 (verify-code §19-B).
         assertThatThrownBy { repository.save(unknown, 1L, at(10, 0)) }
             .isInstanceOf(CoreException::class.java)
-            .extracting("errorType").isEqualTo(ErrorType.NOT_FOUND)
-
-        // 메시지에 LoginId 값(`ghost99`) 이 노출되지 않아야 한다 — `customMessage` 가 응답으로 흘러가는 경로에서
-        // 식별자 노출을 차단 (verify-code §12 / §18).
-        assertThatThrownBy { repository.save(unknown, 1L, at(10, 0)) }
-            .hasMessageNotContaining(unknown.value)
             .hasMessage("사용자가 존재하지 않습니다.")
+            .hasMessageNotContaining(unknown.value) // `customMessage` 가 응답으로 흘러가므로 식별자 미노출 (§12 / §18)
+            .extracting("errorType").isEqualTo(ErrorType.NOT_FOUND)
     }
 
     @DisplayName("findByUserId 는 page.sort 가 비어있지 않으면 BAD_REQUEST 로 거절한다 — silent ignore 차단(§16-A).")

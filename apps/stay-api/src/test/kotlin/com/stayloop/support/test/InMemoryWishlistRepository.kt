@@ -44,10 +44,7 @@ class InMemoryWishlistRepository(
 
     override fun findByUserId(userId: LoginId, page: PageQuery): List<WishlistModel> {
         if (page.sort.isNotEmpty()) {
-            throw CoreException(
-                ErrorType.BAD_REQUEST,
-                "Wishlist 목록은 최근 찜 순으로 고정 정렬되며, 사용자 정의 정렬을 지원하지 않습니다.",
-            )
+            throw CoreException(ErrorType.BAD_REQUEST, SORT_NOT_SUPPORTED_MESSAGE)
         }
         val resolved = users.findByLoginId(userId)?.id ?: return emptyList()
         return store.values
@@ -61,5 +58,7 @@ class InMemoryWishlistRepository(
         // 운영(WishlistRepositoryImpl) 의 메시지와 *문자열까지 동일* — 테스트가 운영의 응답 메시지 정책을
         // 그대로 검증할 수 있게 한다 (verify-code §19-A).
         private const val USER_NOT_FOUND_MESSAGE = "사용자가 존재하지 않습니다."
+        private const val SORT_NOT_SUPPORTED_MESSAGE =
+            "Wishlist 목록은 최근 찜 순으로 고정 정렬되며, 사용자 정의 정렬을 지원하지 않습니다."
     }
 }
