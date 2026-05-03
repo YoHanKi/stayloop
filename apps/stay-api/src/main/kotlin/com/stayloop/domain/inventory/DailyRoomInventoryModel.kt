@@ -14,13 +14,14 @@ import java.time.LocalDate
  * 일자별 객실 재고. (`docs/design/03-class-diagram.md §2`, `04-erd.md §2.1`)
  * **자연 키** `(roomTypeId, date)` — 같은 객실 타입의 같은 일자가 두 행이 될 수 없다.
  *
- * `reservedRooms` 는 `private` 노출 — 외부는 `available()` / `reserveOne()` / `releaseOne()` 으로만 접근.
- * 카운트 필드를 직접 mutable 로 노출하면 음수/초과 진입의 우회 경로가 열린다 (`docs/plan/week2-3.md` 결정).
+ * 모든 mutable 필드는 `var ... protected set` — 외부는 read-only, 변경은 `reserveOne()` / `releaseOne()` 등
+ * 도메인 메서드로만 (PropertyModel.wishCount 와 동일 패턴). 카운트 필드를 직접 set 가능하게 노출하면
+ * 음수/초과 진입의 우회 경로가 열린다.
  *
  * 도메인 레벨 가드:
- * - 생성 시 `0 <= reserved <= total`
+ * - 생성 시 `0 <= reservedRooms <= totalRooms`
  * - `reserveOne()` 은 `available() > 0` 일 때만 (full 시 CONFLICT)
- * - `releaseOne()` 은 `reserved > 0` 일 때만 (음수 진입 차단)
+ * - `releaseOne()` 은 `reservedRooms > 0` 일 때만 (음수 진입 차단)
  *
  * DB CHECK 제약(`total_rooms > 0`, `reserved_rooms BETWEEN 0 AND total`) 은 **마지막 방어선** — 도메인이 1차.
  */
@@ -52,7 +53,8 @@ class DailyRoomInventoryModel internal constructor(
         protected set
 
     @Column(name = "reserved_rooms", nullable = false)
-    private var reservedRooms: Int = reservedRooms
+    var reservedRooms: Int = reservedRooms
+        protected set
 
     init {
         if (roomTypeId <= 0L) {
@@ -104,11 +106,6 @@ class DailyRoomInventoryModel internal constructor(
         }
         reservedRooms -= 1
     }
-
-    /**
-     * 외부 read-only 노출 — 검색/표시용. 변경은 `reserveOne` / `releaseOne` 으로만.
-     */
-    fun reserved(): Int = reservedRooms
 
     companion object {
         fun create(
