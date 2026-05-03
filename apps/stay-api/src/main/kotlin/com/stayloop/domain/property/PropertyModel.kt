@@ -75,7 +75,7 @@ class PropertyModel internal constructor(
     var policy: PropertyPolicy = policy
         protected set
 
-    @Column(name = "main_image_url", length = 500)
+    @Column(name = "main_image_url", length = MAIN_IMAGE_URL_MAX_LENGTH)
     var mainImageUrl: String? = mainImageUrl
         protected set
 
@@ -94,11 +94,13 @@ class PropertyModel internal constructor(
     /**
      * 이미지 갤러리 — Property AR 의 자식 entity.
      * 직접 노출하지 않고 `addImage` / `replaceMainImage` 등 메서드로만 변경.
-     * `@OrderBy("displayOrder ASC")` — DB 재조회 시 순서 결정성 보장 (Copilot #6 가드).
+     *
+     * `@OrderBy("displayOrder ASC, id ASC")` — 1차 키(`displayOrder`)가 동률일 때
+     * 2차 키(`id`)로 안정 정렬을 보장 (verify-code §4 — 단일 키만으로는 동률 비결정).
      */
     @OneToMany(cascade = [CascadeType.ALL], orphanRemoval = true, fetch = FetchType.LAZY)
     @JoinColumn(name = "property_id")
-    @OrderBy("displayOrder ASC")
+    @OrderBy("displayOrder ASC, id ASC")
     private val _images: MutableList<PropertyImageModel> = mutableListOf()
 
     val images: List<PropertyImageModel>
@@ -107,6 +109,13 @@ class PropertyModel internal constructor(
     init {
         if (wishCount < 0) {
             throw CoreException(ErrorType.BAD_REQUEST, "wishCount 는 음수일 수 없습니다.")
+        }
+        // 컬럼 length ↔ 도메인 가드 일관성: mainImageUrl 캐시도 컬럼 길이와 동일 한계 (verify-code §6).
+        if (mainImageUrl != null && mainImageUrl.length > MAIN_IMAGE_URL_MAX_LENGTH) {
+            throw CoreException(
+                ErrorType.BAD_REQUEST,
+                "mainImageUrl 은 ${MAIN_IMAGE_URL_MAX_LENGTH}자 이하여야 합니다.",
+            )
         }
     }
 
@@ -162,6 +171,12 @@ class PropertyModel internal constructor(
         if (imageUrl.isBlank()) {
             throw CoreException(ErrorType.BAD_REQUEST, "대표 이미지 URL 은 비어 있을 수 없습니다.")
         }
+        if (imageUrl.length > MAIN_IMAGE_URL_MAX_LENGTH) {
+            throw CoreException(
+                ErrorType.BAD_REQUEST,
+                "대표 이미지 URL 은 ${MAIN_IMAGE_URL_MAX_LENGTH}자 이하여야 합니다.",
+            )
+        }
         val target = _images.firstOrNull { it.imageUrl == imageUrl }
             ?: throw CoreException(
                 ErrorType.BAD_REQUEST,
@@ -173,6 +188,8 @@ class PropertyModel internal constructor(
     }
 
     companion object {
+        const val MAIN_IMAGE_URL_MAX_LENGTH: Int = 500
+
         fun create(
             name: Name,
             category: PropertyCategory,
