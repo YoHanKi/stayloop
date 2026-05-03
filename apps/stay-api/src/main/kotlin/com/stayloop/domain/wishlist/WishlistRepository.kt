@@ -13,8 +13,10 @@ import java.time.LocalDateTime
  * 도메인 호출부는 BIGINT 를 모른다.
  *
  * 누락 사용자 정책: `findByLoginId` 가 null 을 돌려주면
- * - `existsBy` / `findByUserId` 는 빈 결과 (조회는 silent empty — "찜 없음" 과 의미적으로 동일)
- * - `save` / `deleteBy` 는 `NOT_FOUND` 로 거절 (쓰기는 사용자 부재가 명시적 오류)
+ * - `existsBy` / `findByUserId` — 빈 결과 (조회는 silent empty, "찜 없음" 과 의미적으로 동일)
+ * - `save` — `NOT_FOUND` 로 거절 (boundary 가 LoginId 인데 매핑되는 사용자가 없는 사고 케이스. 새 행을
+ *   사용자 부재로 만들 수 없으므로 명시적 오류)
+ * - `deleteBy` — silent noop (삭제할 행 자체가 없음 — 행이 없는 상태에 deleteBy 호출이 noop 인 것과 동일 의미)
  */
 interface WishlistRepository {
     /**
