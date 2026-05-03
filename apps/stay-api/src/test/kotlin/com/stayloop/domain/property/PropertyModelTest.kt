@@ -125,4 +125,20 @@ class PropertyModelTest {
         assertThat(property.mainImageUrl).isEqualTo("https://cdn/p/1.jpg")
         assertThat(property.images.single().isMain).isTrue()
     }
+
+    @DisplayName("addImage(isMain=true, invalid url) 호출 시 기존 main 플래그가 해제되지 않고 aggregate 상태가 보존된다.")
+    @Test
+    fun shouldPreserveState_whenAddImageFailsValidation() {
+        val property = newProperty()
+        property.addImage("https://cdn/p/1.jpg", isMain = true)
+
+        // 빈 URL 은 PropertyImageModel 생성 단계에서 거절
+        assertThatThrownBy { property.addImage(imageUrl = "  ", isMain = true) }
+            .isInstanceOf(CoreException::class.java)
+
+        // 실패 후에도 기존 main 플래그가 유지되어야 함
+        assertThat(property.images).hasSize(1)
+        assertThat(property.images.single().isMain).isTrue()
+        assertThat(property.mainImageUrl).isEqualTo("https://cdn/p/1.jpg")
+    }
 }
