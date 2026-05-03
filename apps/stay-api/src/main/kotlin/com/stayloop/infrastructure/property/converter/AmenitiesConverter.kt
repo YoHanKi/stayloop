@@ -13,7 +13,7 @@ import jakarta.persistence.Converter
 /**
  * `Amenities` VO ↔ JSON 배열 컬럼 변환. (`docs/design/04-erd.md §2.5`)
  */
-@Converter
+@Converter(autoApply = true)
 class AmenitiesConverter : AttributeConverter<Amenities, String> {
     override fun convertToDatabaseColumn(attribute: Amenities?): String =
         OBJECT_MAPPER.writeValueAsString(

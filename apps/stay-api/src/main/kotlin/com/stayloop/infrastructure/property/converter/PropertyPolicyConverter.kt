@@ -13,7 +13,7 @@ import jakarta.persistence.Converter
  * `PropertyPolicy` VO ↔ JSON 컬럼 변환.
  * Jackson 의존이 도메인에 누출되지 않도록 infrastructure 레이어에 위치 (`docs/design/04-erd.md §2.5`).
  */
-@Converter
+@Converter(autoApply = true)
 class PropertyPolicyConverter : AttributeConverter<PropertyPolicy, String> {
     override fun convertToDatabaseColumn(attribute: PropertyPolicy?): String? =
         attribute?.let { OBJECT_MAPPER.writeValueAsString(it) }
