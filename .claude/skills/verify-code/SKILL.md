@@ -6,7 +6,10 @@ description:
   외부 라이브러리 누출, 컬렉션 정렬 결정성, 캐시-원본 불일치, 입력 검증 누락, 멱등 깨짐, 사일런트 디폴트,
   동시성 사고, 자원 누수, 시간/Clock 의존, 예외 삼킴, 매직 상수, 코드 중복, 가시성 이탈,
   성능 함정(N+1/eager), 보안(시크릿 노출/주입) — 을 점검한다.
-  코드를 새로 작성하거나 리팩토링하지 않으며, 결함을 드러내고 개선 선택지를 제시한다.
+  기본은 **검증자 모드** — 코드를 새로 작성하거나 리팩토링하지 않으며, 결함을 드러내고 개선 선택지를 제시한다.
+  사용자가 "회귀 모드 / 자체 반복 / 스탑할 때까지" 를 명시한 경우에 한해 **수정자 모드 + 자체 회귀 루프** 로 전환되어,
+  Round N 검증 → fix → Round N+1 자체 회귀를 defect-zero 도달까지 반복한다 (§0-A 회귀 모드 절차).
+  검증 룰의 두 축: **본 스킬의 §1~§19-B + `.github/instructions/*.md` (Copilot 동일 기준)** — 두 축 모두 통과해야 PASS.
   자동 호출 순서: **verify-code → verify-architecture → verify-tests**.
   본 스킬이 FAIL 인 동안 verify-architecture / verify-tests 는 의미가 없다 — 코드 본문에 사일런트 사고가 남기 때문.
 user-invocable: true
@@ -24,6 +27,92 @@ Stayloop 의 기능 구현/리팩토링은 **이 스킬을 통과한 뒤에야 v
 
 이 스킬은 **검증자의 관점**으로 동작하며, 코드를 새로 짜주지 않고 **위험한 패턴**을 식별한다.
 
+> **수정자 모드 vs 검증자 모드.** 사용자가 명시적으로 "직접 고쳐줘 / 회귀로 돌려줘" 라고 지시한 경우에 한해
+> 본 스킬은 **수정자 모드** 로 전환되어 fix 까지 직접 적용한다. 그 외에는 검증자 관점 — 위반만 적시한다.
+
+---
+
+### 0️⃣-A 회귀 모드 (Self-Regression Loop)
+
+**언제 회귀 모드를 쓰는가:**
+
+- 사용자가 명시적으로 "회귀 모드 / 자체 반복 / 스탑할 때까지" 요청한 경우
+- 외부 리뷰(Copilot 등) 가 *같은 영역에서 반복적으로 새 결함* 을 잡고 있을 때 — fix 자체가 결함 생산자가 됐다는 신호. 외부 리뷰에 의존해 한 라운드씩 풀면 비용이 누적된다.
+- 변경 단위가 크거나 한 fix 가 다른 영역을 건드리는 횡단 변경일 때
+
+**회귀 루프 절차:**
+
+0. **Round 0 — Scope 확정**. 변경 *파일* 이 아니라 **PR 전체 변경 영역** 을 점검 대상으로 잡는다.
+   ```
+   git diff origin/main...HEAD --name-only
+   ```
+   직전 라운드에 fix 한 파일만 다시 보면, *기존* 파일에 잠복한 동일 패턴 결함을 놓친다 (예: 컬럼 length 가드 누락이 한 VO 에서 발견되면 *모든* `@Column(length=N)` VO 를 grep 으로 횡단 점검). Copilot 은 매 리뷰마다 PR 전체를 보므로, 회귀도 그래야 한다.
+1. **Round N 검증** — 두 축을 모두 본다.
+   - **본 스킬 §1~§19-B** 풀 점검 (verify-code 자체 룰)
+   - **`.github/instructions/*.md`** 의 모든 룰 (Copilot 리뷰가 따르는 동일 기준) — 적용 범위 (`applyTo`) 가 본 PR 변경 파일과 매치되는 instruction 만 활성화
+   - 발견 사항을 위치/카테고리/심각도(P0/P1/P2) 표로 정리. 카테고리 컬럼에는 verify-code §번호 *또는* `.github/instructions` 파일명을 적어 출처를 드러낸다.
+   - **횡단 grep 필수**: 같은 패턴(예: `@Column.*length=`, `@OrderBy`, `assertThatThrownBy { ... }`) 이 PR 전체에 몇 번 등장하는지를 먼저 세고, 그 *모든* 위치에서 가드가 일관되는지 확인한다.
+2. **Fix 적용** — P0/P1 만 처리. P2 는 본 PR scope 밖이면 후속 권고로만 메모.
+3. **자체 회귀 (Round N+1)** — 방금 적용한 fix 가 다음을 어겼는지 다시 본다:
+   - 새 const / 새 분기 / 새 검증 가드가 **§13 매직 상수** / **§19-B DisplayName** / **§14 DRY** 위반을 만들지 않았는가
+   - 새 정책이 **§19-A 운영-테스트 동치성** 을 깨지 않았는가
+   - 새 메시지가 **§12 메시지 노출** 을 만들지 않았는가
+   - 새 시그니처가 **§3 외부 라이브러리 누출** 을 만들지 않았는가
+   - **`.github/instructions` 의 "수용된 트레이드오프 (재지적 금지)"** 를 무심코 깨뜨리지 않았는가 (예: `var ... protected set` 패턴, 테스트 fake reflection 격리)
+4. **호출자 영향 검토** — 변경된 시그니처/정책의 사용처를 grep 으로 조사. 새 가드가 기존 호출을 깨뜨리지 않는지.
+5. **종료 조건 검사:**
+   - 신규 라운드에서 P0/P1 발견 0건 **AND**
+   - `.github/instructions` 룰 위반 0건 **AND**
+   - 모든 호출자 영향 검토 통과 **AND**
+   - `./gradlew ktlintCheck && test` PASS
+   - → **defect zero 도달, 회귀 종료**.
+6. **종료되지 않으면 Round N+2 로 진입.** 라운드 수가 3을 넘기면 전제(아키텍처/도메인 모델) 자체를 의심.
+
+**`.github/instructions` 활성화 규칙:**
+
+각 instruction 의 frontmatter `applyTo` 글롭과 변경 파일 경로를 매치해 활성화 — 매치 안 되면 N/A 로 표기하고 본 라운드에서 제외한다. 예:
+
+| 변경 파일 | 활성 instruction |
+|---|---|
+| `domain/property/PropertyModel.kt` | `domain.instructions.md`, `kotlin.instructions.md`, `copilot-instructions.md` |
+| `infrastructure/property/PropertyJpaRepository.kt` | `repository.instructions.md`, `kotlin.instructions.md`, `copilot-instructions.md` |
+| `application/property/PropertyFacade.kt` | `service.instructions.md`, `kotlin.instructions.md`, `copilot-instructions.md` |
+| `interfaces/api/property/PropertyV1Controller.kt` | `controller.instructions.md`, `kotlin.instructions.md`, `copilot-instructions.md` |
+| `test/.../*Test.kt` | `test.instructions.md`, `kotlin.instructions.md`, `copilot-instructions.md` |
+| `build.gradle.kts` | `gradle.instructions.md` |
+| `application*.yml` | `spring-config.instructions.md` |
+
+**회귀 모드 보고 포맷 (각 라운드):**
+
+```markdown
+## Round N
+### 발견
+| # | 위치 | § | 심각도 | 내용 |
+
+### Fix 적용
+- ...
+
+### 자체 회귀 (이 fix 가 만들어낸 새 결함)
+- §13: ...
+- §19-B: ...
+
+### 다음 라운드 필요 여부
+- ✅ defect zero — 종료
+- ❌ Round N+1 진입 사유: ...
+```
+
+**회귀 모드 종료 후:**
+
+- 작업 트리 상태(어떤 파일이 수정·추가됐는지) 를 **반드시** 보고한다.
+- **커밋·푸시는 자동으로 하지 않는다** — 사용자 confirmation 후에만 진행. 외부에 노출되는 작업이므로.
+- 누적 라운드 수와 각 라운드의 핵심 결함을 한 줄씩 요약해 PR pr.md "고민과 선택" 섹션에 반영하기 좋게 정리.
+
+**원칙:**
+
+- "한 번 fix 했으면 끝" 이 아니라 "fix 가 새 결함을 안 만들었나" 까지 확인해야 회귀가 의미 있다. Copilot 이 한 라운드 더 해서 같은 곳을 다시 잡는 패턴은 대부분 자체 회귀를 안 돌렸기 때문.
+- 매 라운드 fix 는 **최소 단위로 쪼갠다** — 한 라운드에 3개 이상의 독립 변경이 섞이면 다음 라운드에서 어떤 fix 가 결함을 만들었는지 추적이 어렵다.
+- P2 는 회귀 루프에서 제외 — 누적되면 무한 루프. 본 PR scope 안의 P0/P1 만 종료 조건에 포함.
+
 ---
 
 ### 0️⃣ 컨텍스트 수집
@@ -33,8 +122,9 @@ Stayloop 의 기능 구현/리팩토링은 **이 스킬을 통과한 뒤에야 v
 - DB 컬럼 스키마(NOT NULL / UNIQUE / 자연 키)가 도메인 타입과 일관되는가?
 - 외부 라이브러리(Spring Data, Jackson, Redis client, HTTP client, PG SDK 등) 가 새로 도입되었는가?
 - 새 외부 호출(DB 외) 이 도입되었는가? (트랜잭션·재시도·타임아웃 검토 대상)
+- **`.github/instructions/*.md` 중 어떤 것이 활성화되는가?** (변경 파일 경로 ↔ instruction `applyTo` 매치) — §0-A 의 활성화 규칙 표 참고
 
-> 출력: 검증 대상 파일을 한 줄로 요약한 뒤 본격적인 점검을 시작한다.
+> 출력: 검증 대상 파일과 활성 instruction 목록을 한 줄로 요약한 뒤 본격적인 점검을 시작한다.
 
 ---
 
@@ -101,8 +191,11 @@ Grep "^import io\.lettuce\.|^import redis\." path=apps/stay-api/src/main/kotlin/
 | `findAll()` / `findByX()` 가 정렬 없이 응답 | 페이지마다 흔들림 |
 | 페이지 응답의 `total` 을 `List.size` 로 잘못 사용 | 페이지 응답이 잘못됨 |
 | `Set` / `HashMap` 으로 순서 의미 있는 컬렉션 표현 | 비결정 순회 |
+| **`@OrderBy` 단일 키만 — tie-breaker 없음** (`@OrderBy("displayOrder ASC")`) | 1차 키 동률일 때 비결정 순서, "이건 unique 라고 가정" 은 깨질 약속 |
 
-**가드**: `@OneToMany` + `@OrderBy("col ASC")` 또는 메서드 시그니처가 정렬 인자 보유.
+**가드**:
+- `@OneToMany` + `@OrderBy("col ASC")` 또는 메서드 시그니처가 정렬 인자 보유.
+- **단일 키 `@OrderBy` 는 항상 `id` 같은 안정적 tie-breaker 와 함께** — `@OrderBy("displayOrder ASC, id ASC")`. "displayOrder 가 unique 다" 라고 가정하지 않는다 (DB 제약이 없으면 깨질 수 있음).
 
 ---
 
@@ -127,6 +220,9 @@ Grep "^import io\.lettuce\.|^import redis\." path=apps/stay-api/src/main/kotlin/
 | 확인 | 위반 예 |
 |---|---|
 | `@Column(nullable = false)` 인데 도메인 init 검증 없음 | DB 가 막아주길 기다림 |
+| **`@Column(length = N)` 인데 init length 가드 없음** | DB 제약 위반(500) — 사용자에게는 `BAD_REQUEST` 가 아니라 알 수 없는 500 응답 |
+| **컬럼 length 와 init 가드의 상수가 분리되어 있음** | 한 쪽만 변경 시 어긋남 — 동일 `companion const val X_MAX_LENGTH` 로 묶여야 함 |
+| **캐시 컬럼(역정규화)에 length 가드가 빠짐** (예: `mainImageUrl`) | 원본 컬럼은 가드돼도 캐시 갱신 경로가 우회 |
 | 인공 PK 참조가 0/음수 허용 | `propertyId: Long` 0 통과 |
 | 음수 / 0 / 빈 문자열 / 너무 긴 문자열 가드 누락 | `Money(-1)` / `Name("")` 통과 |
 | 빈 컬렉션 허용 안 되는데 `emptyList()` 통과 | `BedConfig(emptyMap())` |
@@ -137,7 +233,15 @@ Grep "^import io\.lettuce\.|^import redis\." path=apps/stay-api/src/main/kotlin/
 
 **가드**:
 - `init { require(...) }` 또는 `if (...) throw CoreException(ErrorType.X, "...")`. DB 제약은 *마지막* 방어선.
+- **컬럼 length ↔ 도메인 가드 일관성**: `@Column(length = N)` 가 있는 모든 String 필드에 대응하는 `init { if (value.length > N) throw ... }` 가 있어야 한다. 두 N 은 *같은* `companion object` 의 `const val MAX_LENGTH` 로 묶어 한 곳에서 관리. `Name.kt` / `Address.kt` / `PropertyImageModel.kt` 가 정렬 패턴.
+- 캐시 컬럼(역정규화) 도 동일 길이 가드 — 원본만 가드하고 캐시 setter 를 우회하면 위반 (verify-code 회귀 사각지대).
 - **상태 변경 메서드의 순서**: 검증·생성 먼저, 상태 변경은 통과 후에. Aggregate 메서드가 도중에 예외를 던져도 객체는 일관된 상태로 남아야 함 (Strong Exception Safety / Copilot 패턴).
+
+**점검 명령** (이 가드 누락 일괄 검출):
+```
+Grep "@Column.*length\s*=\s*\d+" path=apps/.../main → 모든 length 컬럼 추출
+→ 같은 파일에 `length >` 가드가 있는지 대조
+```
 
 ---
 
@@ -230,6 +334,7 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 | catch 시 메시지 일반화 없이 raw 메시지 그대로 wrap | `CoreException(INTERNAL_ERROR, "JSON 파싱: ${e.message}")` → 응답에 `path[0].field` 등 내부 구조 노출 |
 | **읽기 측만 try/catch, 쓰기 측은 raw 통과** | `convertToEntityAttribute` 는 cause 보존하면서 `convertToDatabaseColumn` 의 `writeValueAsString` 예외는 무가공 — 같은 컨버터 안에서 정책이 갈림 |
 | **로그에 raw payload 를 무제한 노출** (`log.warn("...dbData='{}'", dbData, e)`) | 길이/PII/시크릿 누설 — 로그 부피·보안 양쪽 함정 |
+| **KDoc `@property` vs `@param` 혼동** | `val/var` 없는 생성자 매개변수에 `@property` 를 적으면 IDE 가 link 를 못 찾고 문서가 거짓말. property 만 `@property`, 단순 매개변수는 `@param` |
 
 **가드**:
 - **`CoreException(errorType, customMessage, cause)` 시그니처를 항상 사용** — `cause` 로 원인 보존.
@@ -433,8 +538,13 @@ query.sort.map { comparatorFor(it.property, it.direction) }
 | DisplayName 이 "정상/실패 모두" 인데 정상만 검증 | 실패 회귀가 안 잡힘 |
 | 한 `@Test` 안에서 두 가지 동작을 검증하는데 이름은 한 가지만 | given/when/then 분해 신호 |
 | 한국어 자연어와 코드 동작이 시제·주체가 어긋남 (수동/능동, 거절/허용) | 명세 신뢰 저하 |
+| **DisplayName 은 "INTERNAL_ERROR 로 거절" 이라고 명시했는데, 어설션이 `instanceof CoreException` 만 검증** | ErrorType 정책이 바뀌어도(BAD_REQUEST 로 변경 등) 테스트가 통과 — silent policy drift |
+| **`assertThatThrownBy { ... }` 블록이 두 개 이상인데 각 블록의 어설션 강도가 다름** | 첫 블록은 `errorType` 까지, 두 번째는 `instanceof` 만 — 같은 실패 카테고리인데 회귀 가드 비대칭 |
 
-**가드**: DisplayName 은 *실제로 검증되는 케이스만* 적는다. 추가 케이스는 별도 `@Test` 또는 `@ParameterizedTest` 로 분리하고 각각 자기 DisplayName 을 가진다. (verify-tests 게이트의 명세성 점검과 한 쌍 — verify-code 단계에서도 한 번 더 거른다.)
+**가드**:
+- DisplayName 은 *실제로 검증되는 케이스만* 적는다. 추가 케이스는 별도 `@Test` 또는 `@ParameterizedTest` 로 분리하고 각각 자기 DisplayName 을 가진다.
+- **DisplayName 에 ErrorType 명(`BAD_REQUEST` / `INTERNAL_ERROR` / `CONFLICT` / `UNAUTHORIZED`) 이 들어가면, 어설션도 반드시 `extracting("errorType").isEqualTo(ErrorType.X)` 까지 본다.** instanceof 만으로는 정책 회귀가 안 잡힌다 (verify-tests 게이트의 명세성 점검과 한 쌍).
+- 한 테스트 안에 `assertThatThrownBy` 블록이 여러 개라면 *모든 블록* 이 같은 어설션 강도를 가진다 — 한 쪽만 강하면 비대칭 회귀 사각지대.
 
 ---
 
@@ -550,7 +660,8 @@ P0 위반 1건도 FAIL. P1 / P2 는 누적 정도와 영향 범위로 판단.
 
 ### 2️⃣3️⃣ 톤 & 원칙
 
-- **코드를 직접 수정하지 않는다.** 위반을 적시하고 어떻게 고칠지는 개발자가 결정한다.
+- **기본은 검증자 모드** — 코드를 직접 수정하지 않는다. 위반을 적시하고 어떻게 고칠지는 개발자가 결정한다.
+- **회귀 모드(§0-A) 진입 시에만 수정자 모드** — 사용자가 명시한 경우에 한해 fix 까지 직접 적용하고 자체 회귀 루프를 돈다. defect-zero 도달 후 *반드시* 멈추고 작업 트리 상태를 보고한다. 커밋·푸시는 자동 진행 금지.
 - 100% 순수성을 강요하지 않는다. 이탈은 **이유와 함께** 명시되어야 PASS.
 - FAIL 시 **회귀 방지 테스트도 함께** 권고한다 — verify-tests 게이트가 받는다.
 - "지적이 많아 보일 때" 는 우선순위로 압축한다 — P0 부터 해소되면 P1/P2 는 후속 PR.
