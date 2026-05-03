@@ -57,9 +57,9 @@ class InMemoryDailyRoomInventoryRepositoryTest {
         repository.save(DailyRoomInventoryModel.create(roomTypeId, date, totalRooms = 5))
         repository.save(DailyRoomInventoryModel.create(roomTypeId, date, totalRooms = 7))
 
-        val found = repository.findById(roomTypeId, date)
-        assertThat(found).isNotNull
-        assertThat(found!!.totalRooms).isEqualTo(7)
+        assertThat(repository.findById(roomTypeId, date))
+            .isNotNull
+            .extracting("totalRooms").isEqualTo(7)
         assertThat(repository.findAllInRange(roomTypeId, date, date.plusDays(1))).hasSize(1)
     }
 }

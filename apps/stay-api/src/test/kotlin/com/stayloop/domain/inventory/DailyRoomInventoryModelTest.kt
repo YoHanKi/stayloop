@@ -6,6 +6,8 @@ import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import java.time.LocalDate
 
 class DailyRoomInventoryModelTest {
@@ -20,34 +22,37 @@ class DailyRoomInventoryModelTest {
             .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
     }
 
-    @DisplayName("totalRooms 가 0 이하이면 BAD_REQUEST 로 거절된다.")
-    @Test
-    fun shouldReject_whenTotalIsZeroOrNegative() {
+    @DisplayName("totalRooms 가 0 이하(0 / 음수) 이면 BAD_REQUEST 로 거절된다.")
+    @ParameterizedTest
+    @ValueSource(ints = [0, -1, -100])
+    fun shouldReject_whenTotalIsZeroOrNegative(totalRooms: Int) {
         assertThatThrownBy {
-            DailyRoomInventoryModel.create(roomTypeId = 1L, date = anyDate, totalRooms = 0)
+            DailyRoomInventoryModel.create(roomTypeId = 1L, date = anyDate, totalRooms = totalRooms)
         }.isInstanceOf(CoreException::class.java)
             .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
     }
 
     @DisplayName("reservedRooms 가 음수이면 BAD_REQUEST 로 거절된다.")
-    @Test
-    fun shouldReject_whenReservedIsNegative() {
+    @ParameterizedTest
+    @ValueSource(ints = [-1, -100])
+    fun shouldReject_whenReservedIsNegative(reservedRooms: Int) {
         assertThatThrownBy {
-            DailyRoomInventoryModel.create(roomTypeId = 1L, date = anyDate, totalRooms = 5, reservedRooms = -1)
+            DailyRoomInventoryModel.create(roomTypeId = 1L, date = anyDate, totalRooms = 5, reservedRooms = reservedRooms)
         }.isInstanceOf(CoreException::class.java)
             .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
     }
 
-    @DisplayName("roomTypeId 가 0 이하이면 BAD_REQUEST 로 거절된다 — 영속화된 RoomType 참조 필수.")
-    @Test
-    fun shouldReject_whenRoomTypeIdIsZeroOrNegative() {
+    @DisplayName("roomTypeId 가 0 이하(0 / 음수) 이면 BAD_REQUEST 로 거절된다 — 영속화된 RoomType 참조 필수.")
+    @ParameterizedTest
+    @ValueSource(longs = [0L, -1L, -100L])
+    fun shouldReject_whenRoomTypeIdIsZeroOrNegative(roomTypeId: Long) {
         assertThatThrownBy {
-            DailyRoomInventoryModel.create(roomTypeId = 0L, date = anyDate, totalRooms = 5)
+            DailyRoomInventoryModel.create(roomTypeId = roomTypeId, date = anyDate, totalRooms = 5)
         }.isInstanceOf(CoreException::class.java)
             .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
     }
 
-    @DisplayName("available() 은 totalRooms - reservedRooms 이며 음수가 될 수 없다.")
+    @DisplayName("available() 은 totalRooms - reservedRooms 로 계산된다.")
     @Test
     fun shouldComputeAvailableAsTotalMinusReserved() {
         val inventory = DailyRoomInventoryModel.create(roomTypeId = 1L, date = anyDate, totalRooms = 5, reservedRooms = 2)
@@ -60,7 +65,7 @@ class DailyRoomInventoryModelTest {
         val inventory = DailyRoomInventoryModel.create(roomTypeId = 1L, date = anyDate, totalRooms = 5)
         inventory.reserveOne()
         inventory.reserveOne()
-        assertThat(inventory.reserved()).isEqualTo(2)
+        assertThat(inventory.reservedRooms).isEqualTo(2)
         assertThat(inventory.available()).isEqualTo(3)
     }
 
@@ -78,7 +83,7 @@ class DailyRoomInventoryModelTest {
     fun shouldDecrementReserved_whenReleasing() {
         val inventory = DailyRoomInventoryModel.create(roomTypeId = 1L, date = anyDate, totalRooms = 5, reservedRooms = 2)
         inventory.releaseOne()
-        assertThat(inventory.reserved()).isEqualTo(1)
+        assertThat(inventory.reservedRooms).isEqualTo(1)
         assertThat(inventory.available()).isEqualTo(4)
     }
 
@@ -97,7 +102,7 @@ class DailyRoomInventoryModelTest {
         val inventory = DailyRoomInventoryModel.create(roomTypeId = 1L, date = anyDate, totalRooms = 5, reservedRooms = 2)
         inventory.reserveOne()
         inventory.releaseOne()
-        assertThat(inventory.reserved()).isEqualTo(2)
+        assertThat(inventory.reservedRooms).isEqualTo(2)
         assertThat(inventory.available()).isEqualTo(3)
     }
 }
