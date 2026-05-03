@@ -41,24 +41,34 @@ class InMemoryPropertyRepository : PropertyRepository {
         store.remove(id)
     }
 
+    /**
+     * 다중 sort key 를 차례로 합성해 적용한다 (운영 RepositoryImpl 의 `Sort.by(orders)` 와 동일 의미론).
+     * 첫 키만 적용하면 운영 ↔ 테스트 동작이 갈려 회귀가 마스킹된다 (Copilot 3차 가드).
+     */
     private fun applySort(list: List<PropertyModel>, query: PageQuery): List<PropertyModel> {
         if (query.sort.isEmpty()) return list
-        val first = query.sort.first()
-        val keySelector: (PropertyModel) -> Comparable<*>? = when (first.property) {
+        val comparator = query.sort
+            .map { key -> comparatorFor(key.property, key.direction) }
+            .reduce { acc, next -> acc.then(next) }
+        return list.sortedWith(comparator)
+    }
+
+    private fun comparatorFor(property: String, direction: SortDirection): Comparator<PropertyModel> {
+        val keySelector: (PropertyModel) -> Comparable<*>? = when (property) {
             "wishCount" -> { p -> p.wishCount }
             "rating" -> { p -> p.rating.value }
             "name" -> { p -> p.name.value }
             else -> throw CoreException(
                 ErrorType.BAD_REQUEST,
-                "지원하지 않는 정렬 키입니다: ${first.property}",
+                "지원하지 않는 정렬 키입니다: $property",
             )
         }
 
         @Suppress("UNCHECKED_CAST")
-        val comparator: Comparator<PropertyModel> = compareBy { keySelector(it) as Comparable<Any>? }
-        return when (first.direction) {
-            SortDirection.ASC -> list.sortedWith(comparator)
-            SortDirection.DESC -> list.sortedWith(comparator.reversed())
+        val asc: Comparator<PropertyModel> = compareBy { keySelector(it) as Comparable<Any>? }
+        return when (direction) {
+            SortDirection.ASC -> asc
+            SortDirection.DESC -> asc.reversed()
         }
     }
 
