@@ -1,15 +1,17 @@
 ---
 name: verify-architecture
 description:
-  Stayloop 기능 구현/리팩토링 직후, 테스트 실행 전에 아키텍처 정합성을 검수하는 게이트.
+  Stayloop 기능 구현/리팩토링 직후, **verify-code 가 PASS 된 뒤에** 호출되어 아키텍처 정합성을 검수하는 게이트.
   계층 의존 방향(domain ← application ← interfaces.api / infrastructure), Aggregate 패키지 구성·명명 규약,
   트랜잭션 경계, Repository 인터페이스 위치, DTO/JPA 어노테이션 누출, 멀티모듈 경계를 점검한다.
   코드를 새로 작성하거나 리팩토링하지 않으며, 위반·이탈을 드러내고 개선 선택지를 제시한다.
-  verify-tests 보다 먼저 호출되어 구조 결함을 거른다. 본 스킬이 FAIL 인 동안 verify-tests 는 의미가 없다.
+  자동 호출 순서: **verify-code → verify-architecture → verify-tests**.
+  본 스킬이 FAIL 인 동안 verify-tests 는 의미가 없다.
 user-invocable: true
 ---
 
-Stayloop 의 모든 기능 구현/리팩토링은 **이 스킬을 통과한 뒤에야 verify-tests 로 넘어간다.**
+Stayloop 의 모든 기능 구현/리팩토링은 **verify-code → verify-architecture → verify-tests** 순서로 통과해야 한다.
+본 스킬은 verify-code 가 PASS 된 후에 호출되며, 통과해야만 verify-tests 로 넘어간다.
 이 스킬은 **검증자의 관점**으로 동작하며, 코드를 새로 짜주지 않고 **구조 위반·명명 이탈·계층 침범**을 식별한다.
 
 ---
