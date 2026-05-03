@@ -474,8 +474,19 @@ private fun toSpringSort(keys: List<SortKey>): Sort = ...
 | 큰 텍스트(`@Column(columnDefinition = "TEXT")`) 항상 SELECT | projection 미적용 |
 | 인덱스 없는 컬럼으로 빈번 검색 | 본 라운드 ERD 와 정합 확인 |
 | 배열 / 컬렉션 변환을 매 호출마다 (`toList()` 반복) | 캐싱 후보 |
+| **`@IdClass` / `@EmbeddedId` 의 PK 컬럼·순서와 동일한 `@Table(indexes = ...)` 보조 인덱스 명시** | PK 자체가 같은 인덱스를 제공 — 중복 인덱스가 쓰기 amplification + 스토리지 비용으로 누적 |
+| 단일 `@Id` 컬럼과 동일한 `@Table(indexes = ...)` (예: `id` 컬럼만 있는 보조 인덱스) | PK 가 cluster 인덱스로 충분 |
 
-**가드**: 루프 안 Repository 호출 → `findAllByXIn(...)` 시그니처. EAGER 는 명시적 이유 없으면 LAZY.
+**가드**:
+- 루프 안 Repository 호출 → `findAllByXIn(...)` 시그니처. EAGER 는 명시적 이유 없으면 LAZY.
+- **`@Table(indexes = ...)` 를 추가하기 전에 PK 와 컬럼·순서가 겹치는지 확인**. 같으면 제거. *다른* 접근 패턴(예: 자식 entity 의 `(parent_id, display_order)` / `city` 단독 / 비-PK 컬럼) 일 때만 명시.
+- 중복을 피하기 위해 KDoc 에 "**인덱스 정책**" 섹션을 두고 *왜 명시 안 했는지 / 어떤 접근 패턴에서만 추가하는지* 를 박아둔다 — 후임이 무심코 다시 추가하지 않게.
+
+**점검 명령**:
+```
+Grep "indexes\s*=" path=apps/stay-api/src/main/kotlin → 모든 @Table indexes 추출
+→ 같은 파일의 @IdClass / @EmbeddedId / @Id 컬럼과 columnList 비교
+```
 
 ---
 
