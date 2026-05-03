@@ -14,6 +14,9 @@ import jakarta.persistence.Table
  *
  * **`property_id` 컬럼은 부모의 `@JoinColumn(name="property_id")` 가 단독 관리** (`insertable = false, updatable = false`).
  * 자식 모델이 부모 id 를 직접 들고 있으면 신규 Property(영속화 전 id=0) 에서 0 으로 굳어버리는 버그가 발생.
+ *
+ * **컬럼 length ↔ `init` length 가드** 는 동일 상수(`IMAGE_URL_MAX_LENGTH`, `ALT_TEXT_MAX_LENGTH`) 로 묶여
+ * DB 제약 위반(500) 대신 BAD_REQUEST 로 거절된다 (verify-code §6).
  */
 @Entity
 @Table(
@@ -34,11 +37,11 @@ class PropertyImageModel internal constructor(
     var propertyId: Long = 0L
         protected set
 
-    @Column(name = "image_url", nullable = false, length = 500)
+    @Column(name = "image_url", nullable = false, length = IMAGE_URL_MAX_LENGTH)
     var imageUrl: String = imageUrl
         protected set
 
-    @Column(name = "alt_text", length = 255)
+    @Column(name = "alt_text", length = ALT_TEXT_MAX_LENGTH)
     var altText: String? = altText
         protected set
 
@@ -54,6 +57,12 @@ class PropertyImageModel internal constructor(
         if (imageUrl.isBlank()) {
             throw CoreException(ErrorType.BAD_REQUEST, "이미지 URL 은 비어 있을 수 없습니다.")
         }
+        if (imageUrl.length > IMAGE_URL_MAX_LENGTH) {
+            throw CoreException(ErrorType.BAD_REQUEST, "이미지 URL 은 ${IMAGE_URL_MAX_LENGTH}자 이하여야 합니다.")
+        }
+        if (altText != null && altText.length > ALT_TEXT_MAX_LENGTH) {
+            throw CoreException(ErrorType.BAD_REQUEST, "이미지 alt 텍스트는 ${ALT_TEXT_MAX_LENGTH}자 이하여야 합니다.")
+        }
         if (displayOrder < 0) {
             throw CoreException(ErrorType.BAD_REQUEST, "display_order 는 0 이상이어야 합니다.")
         }
@@ -68,6 +77,9 @@ class PropertyImageModel internal constructor(
     }
 
     companion object {
+        const val IMAGE_URL_MAX_LENGTH: Int = 500
+        const val ALT_TEXT_MAX_LENGTH: Int = 255
+
         fun create(
             imageUrl: String,
             altText: String? = null,
