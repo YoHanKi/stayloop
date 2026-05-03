@@ -58,6 +58,8 @@ Stayloop 의 기능 구현/리팩토링은 **이 스킬을 통과한 뒤에야 v
    - 새 정책이 **§19-A 운영-테스트 동치성** 을 깨지 않았는가
    - 새 메시지가 **§12 메시지 노출** 을 만들지 않았는가
    - 새 시그니처가 **§3 외부 라이브러리 누출** 을 만들지 않았는가
+   - 새 KDoc 의 **"차단 / 보장 / 방지 / 불가능"** 약속이 *실제 가드* 와 일치하는가 (§19-B — 문서 거짓말 방지)
+   - 새 `create()` / 팩토리가 **캐시 컬럼을 직접 매개변수로 받지 않는가** (§5 — 생성자 우회 경로 차단)
    - **`.github/instructions` 의 "수용된 트레이드오프 (재지적 금지)"** 를 무심코 깨뜨리지 않았는가 (예: `var ... protected set` 패턴, 테스트 fake reflection 격리)
 4. **호출자 영향 검토** — 변경된 시그니처/정책의 사용처를 grep 으로 조사. 새 가드가 기존 호출을 깨뜨리지 않는지.
 5. **종료 조건 검사:**
@@ -208,8 +210,12 @@ Grep "^import io\.lettuce\.|^import redis\." path=apps/stay-api/src/main/kotlin/
 | 캐시 컬럼만 갱신, 원본 컬렉션 플래그 미동기화 | `mainImageUrl = url` 만 → `is_main = TRUE` 가 0개/2개 |
 | 원본은 갱신했는데 캐시 컬럼 누락 | 캐시 stale |
 | 캐시 갱신이 **원본 검증 없이** 입력을 캐시에 저장 | 갤러리에 없는 URL 이 `mainImageUrl` 에 들어감 |
+| **생성자/팩토리(`create()`) 가 캐시 컬럼을 직접 매개변수로 받음** — 메서드 가드는 잘 잡아도 *생성 시점의 우회 경로* 가 열림 | `PropertyModel.create(mainImageUrl="...")` 가 갤러리 없이 캐시만 세팅 — 메서드 SSOT 가드를 무력화 |
+| `internal` 생성자(JPA hydration 용) 와 *공개* 팩토리(`create()`) 의 책임 구분 부재 | JPA hydration 은 DB 가 일관성 보장한 상태에서만 호출되지만, `create()` 는 외부 입력 — 두 진입점이 같은 매개변수를 받으면 외부도 우회 가능 |
 
-**가드**: 캐시 갱신 메서드는 (1) 원본 검증 → (2) 둘 동시 갱신 → (3) 검증 실패 시 둘 다 불변.
+**가드**:
+- 캐시 갱신 *메서드* 는 (1) 원본 검증 → (2) 둘 동시 갱신 → (3) 검증 실패 시 둘 다 불변.
+- **`create()` 팩토리는 캐시 컬럼을 매개변수로 받지 않는다.** 캐시는 *상태 변경 메서드* (`addImage(isMain=true)` / `replaceMainImage()`) 를 통해서만 갱신. JPA hydration 용 `internal constructor` 는 매개변수를 유지하되 *외부 진입점 (`create()`) 과 분리* — DB 의 일관성 보장에 의존하는 경로는 하나만 둔다.
 
 ---
 
@@ -540,6 +546,7 @@ query.sort.map { comparatorFor(it.property, it.direction) }
 | 한국어 자연어와 코드 동작이 시제·주체가 어긋남 (수동/능동, 거절/허용) | 명세 신뢰 저하 |
 | **DisplayName 은 "INTERNAL_ERROR 로 거절" 이라고 명시했는데, 어설션이 `instanceof CoreException` 만 검증** | ErrorType 정책이 바뀌어도(BAD_REQUEST 로 변경 등) 테스트가 통과 — silent policy drift |
 | **`assertThatThrownBy { ... }` 블록이 두 개 이상인데 각 블록의 어설션 강도가 다름** | 첫 블록은 `errorType` 까지, 두 번째는 `instanceof` 만 — 같은 실패 카테고리인데 회귀 가드 비대칭 |
+| **KDoc / 주석의 강한 약속(`차단한다` / `보장한다` / `방지한다` / `불가능`) 과 실제 가드 불일치** | "Int overflow 차단" 이라고 적혀 있는데 실제로는 size 상한만 있고 page 가드 없음 — 문서가 *거짓말*. 호출자/리뷰어가 잘못 신뢰 |
 
 **가드**:
 - DisplayName 은 *실제로 검증되는 케이스만* 적는다. 추가 케이스는 별도 `@Test` 또는 `@ParameterizedTest` 로 분리하고 각각 자기 DisplayName 을 가진다.
