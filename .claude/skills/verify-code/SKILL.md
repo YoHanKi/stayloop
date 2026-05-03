@@ -341,6 +341,7 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 | **읽기 측만 try/catch, 쓰기 측은 raw 통과** | `convertToEntityAttribute` 는 cause 보존하면서 `convertToDatabaseColumn` 의 `writeValueAsString` 예외는 무가공 — 같은 컨버터 안에서 정책이 갈림 |
 | **로그에 raw payload 를 무제한 노출** (`log.warn("...dbData='{}'", dbData, e)`) | 길이/PII/시크릿 누설 — 로그 부피·보안 양쪽 함정 |
 | **KDoc `@property` vs `@param` 혼동** | `val/var` 없는 생성자 매개변수에 `@property` 를 적으면 IDE 가 link 를 못 찾고 문서가 거짓말. property 만 `@property`, 단순 매개변수는 `@param` |
+| **`CoreException` 의 `customMessage` 에 외부 식별자(LoginId / email / userId / 토큰 ID 등) 를 직접 박음** | `ApiControllerAdvice` 가 `customMessage` 를 응답으로 흘리므로 식별자가 클라이언트에 노출. 계정 enumeration / 식별자 추적 위험. `"사용자가 존재하지 않습니다: ${userId.value}"` 형태는 P1 보안 결함 |
 
 **가드**:
 - **`CoreException(errorType, customMessage, cause)` 시그니처를 항상 사용** — `cause` 로 원인 보존.
@@ -348,6 +349,7 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 - 외부 라이브러리 예외(`Jackson`, `JDBC`, `Redis`) 의 메시지는 `e.message` 를 customMessage 에 넣지 않는다. `cause` 로 보존하고 로그에서 추적.
 - **read 측이 try/catch 라면 write 측도 동일 정책으로 감싼다** — Jackson 의 `writeValueAsString` 도 `JsonProcessingException` 을 던질 수 있다. 한 컨버터 안에서 한 쪽만 감싸면 비대칭 (Copilot 3차 가드).
 - **로그에 들어가는 raw payload 는 길이 + 프리뷰만**. 예: `log.warn("X 역직렬화 실패. length={}, preview='{}'", dbData.length, dbData.take(80), e)`. PREVIEW_LIMIT 은 `private const`.
+- **`CoreException(ErrorType.X, customMessage)` 의 `customMessage` 는 *클라이언트 응답으로 직행* 한다** — `ApiControllerAdvice` 가 그대로 `ErrorResponse.message` 로 흘림. 따라서 식별자(LoginId / email / userId / reservationId / token) 를 메시지에 박지 않는다. 메시지는 `"사용자가 존재하지 않습니다."` 처럼 일반화하고, 식별자는 별도로 `log.warn("user not found loginId={}", loginId.value)` 로 서버 로그에만 남긴다. 운영-테스트 동치를 위해 InMemory 더블의 메시지도 동일 정책 (§19-A).
 
 ```kotlin
 override fun convertToDatabaseColumn(attribute: T?): String {
@@ -441,6 +443,7 @@ override fun convertToEntityAttribute(dbData: String?): T {
 | 도메인 정렬 키가 `@Embedded` VO 인데 매핑이 `vo` 만 (`vo.value` 누락) | `Sort.by("rating")` 이 `rating.value` 가 아니라 임베디드 객체로 정렬 시도 → 런타임 실패 |
 | 운영 RepositoryImpl 과 InMemory 더블의 미등록 키 정책이 다름 | 한쪽은 무시, 한쪽은 실패 — 테스트가 운영을 신뢰할 수 없음 |
 | 외부 입력 enum 매칭이 `valueOf` 직접 (예외 핸들링 없음) | `IllegalArgumentException` 이 500 으로 |
+| **외부 입력을 받지만 조용히 무시 (silent ignore)** — 정렬 / 필터 / 페이징 / 검색 옵션 등 | `findByX(query: PageQuery)` 가 `query.sort` 를 받아놓고 항상 고정 정렬을 적용하면, 호출자는 자기 sort 가 작동하지 않는 걸 깨닫지 못함. 디버깅 시간만 늘어나는 silent bug. **고정 정책이면 sort 가 비어있지 않을 때 BAD_REQUEST 거절**, 아니면 화이트리스트 + 변환. 받지 않을 거면 시그니처에서 `PageQuery.sort` 를 못 받게 별도 타입으로 분리. |
 
 **가드**:
 - **화이트리스트 + BAD_REQUEST 거절** — 미등록 키는 도메인이 받지 않는다. 운영 / 테스트 양쪽 동일 정책.
@@ -476,6 +479,7 @@ private fun toSpringSort(keys: List<SortKey>): Sort = ...
 | 배열 / 컬렉션 변환을 매 호출마다 (`toList()` 반복) | 캐싱 후보 |
 | **`@IdClass` / `@EmbeddedId` 의 PK 컬럼·순서와 동일한 `@Table(indexes = ...)` 보조 인덱스 명시** | PK 자체가 같은 인덱스를 제공 — 중복 인덱스가 쓰기 amplification + 스토리지 비용으로 누적 |
 | 단일 `@Id` 컬럼과 동일한 `@Table(indexes = ...)` (예: `id` 컬럼만 있는 보조 인덱스) | PK 가 cluster 인덱스로 충분 |
+| **Read-then-Write 의 SELECT 중복** — `existsById → deleteById` / `existsById → save` / `findById → save` 등 동일 키에 대한 select 가 두 번 발생 | `deleteById` 자체가 내부적으로 select 후 delete — 외부에서 `existsById` 추가하면 SELECT 2회. silent noop 만 필요하면 `findById(key).ifPresent { delete(it) }` (1회 SELECT) 또는 `@Modifying @Query("DELETE ...")` (0회 SELECT, 1회 DELETE). 멱등 / 부재 허용을 위한 가드가 *쿼리 횟수* 를 늘리지 않게 한다. |
 
 **가드**:
 - 루프 안 Repository 호출 → `findAllByXIn(...)` 시그니처. EAGER 는 명시적 이유 없으면 LAZY.
@@ -669,10 +673,19 @@ verify-tests 게이트가 그 테스트를 강제 — 두 게이트는 한 쌍.
 분량이 많기 때문에 모든 항목을 동등하게 다루지 않는다. 변경 단위와 무관하게 우선 검토:
 
 - **P0 (반드시 차단)**: §1 Null 일관성 / §2 자식 Entity 식별자 / §3 외부 라이브러리 누출 / §6 입력 검증 / §16 트랜잭션 / §18 보안
-- **P1 (강한 권고)**: §5 캐시 SSOT / §7 멱등성 / §9 동시성 / §11 시간 / §12 예외 / §15 가시성
-- **P2 (권고)**: §4 결정성 / §8 사일런트 디폴트 / §10 자원 / §13 매직 상수 / §14 DRY / §17 성능 / §19 어휘
+- **P1 (강한 권고)**: §5 캐시 SSOT / §7 멱등성 / §9 동시성 / §11 시간 / §12 예외 (특히 메시지에 외부 식별자 노출) / §15 가시성 / §16-A 외부 입력 매핑 (silent ignore 포함) / §17 성능 (Read-then-Write SELECT 중복 / `@Table(indexes=...)` PK 중복)
+- **P2 (권고)**: §4 결정성 (tie-breaker) / §8 사일런트 디폴트 / §10 자원 / §13 매직 상수 / §14 DRY / §19 어휘
 
 P0 위반 1건도 FAIL. P1 / P2 는 누적 정도와 영향 범위로 판단.
+
+**P2 보류 결정의 회귀 가드** — 회귀 모드(§0-A) 에서 P2 로 분류해 보류한 항목 중 다음 패턴은 **외부 리뷰가 P1 이상으로 잡는다**. P2 처리 전에 한 번 더 의심한다:
+
+1. **예외 메시지의 외부 식별자 (LoginId / email / userId / token)** — 보안 / 응답 일관성 P1. 메시지 일반화 + 식별자는 로그로.
+2. **Read-then-Write 의 SELECT 중복** (`existsBy → delete`, `findById → save` 등) — 운영 부하 P1. 단일 쿼리로 통합.
+3. **외부 입력의 silent ignore** (`PageQuery.sort` 무시 등) — 호출자 오용 가림 P1. 거절 또는 화이트리스트.
+4. **운영-테스트 더블 정책 비대칭** — 둘이 다르게 동작하면 회귀 사각지대 P1, 같은 결함도 양쪽에서 동시 fix.
+
+위 4가지를 P2 로 보류하려면 **명시적 사유** ("4주차 동시성 영역", "별도 인프라 라운드" 같은 *일반화 가능한 이유*) 가 PR 본문에 박혀야 한다. "본 PR scope 외" 같은 모호한 사유로 미루면 다음 라운드에 외부 리뷰로 다시 잡힘.
 
 ---
 
