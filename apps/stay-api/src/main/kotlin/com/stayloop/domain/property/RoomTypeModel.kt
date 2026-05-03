@@ -45,6 +45,12 @@ class RoomTypeModel internal constructor(
     var bedConfig: BedConfig = bedConfig
         protected set
 
+    init {
+        if (propertyId <= 0L) {
+            throw CoreException(ErrorType.BAD_REQUEST, "propertyId 는 양수여야 합니다 (영속화된 Property 의 id).")
+        }
+    }
+
     /**
      * 예약 요청 인원이 객실 최대 인원을 초과하면 거부.
      * AC-5 의 도메인 레벨 검증 지점 (`docs/design/01-requirements.md §2.1`).
