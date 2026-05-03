@@ -46,10 +46,10 @@ Stayloop 의 기능 구현/리팩토링은 **이 스킬을 통과한 뒤에야 v
 |---|---|
 | DB 컬럼 `nullable = false` 인데 컨버터가 `attribute: T?` 로 null 통과 | `convertToDatabaseColumn(null)` 이 `null` 또는 `"{}"` 반환 → 제약 위반 / 사일런트 디폴트 |
 | 도메인 타입 non-null 인데 `convertToEntityAttribute` 가 `T?` 반환 | 호출자 NPE |
-| 같은 코드베이스의 컨버터들이 null 정책이 다름 | 일관성 깨짐 |
+| **같은 코드베이스의 컨버터들이 null 정책이 다름** | 일부는 거절, 일부는 `EMPTY` 반환 — 일관성 깨짐. 한 코드베이스의 모든 컨버터를 한 정책으로 통일 |
 | Kotlin 의 `T?` 와 DB `NULL` 의 의미가 코드 주석으로만 추론됨 | 의도가 코드로 드러나지 않음 |
 
-**가드**: NOT NULL 컬럼 컨버터는 null 입력 즉시 `INTERNAL_ERROR`. NULL 허용이면 도메인 타입도 일관되게 `T?`.
+**가드**: NOT NULL 컬럼 컨버터는 null 입력 즉시 `INTERNAL_ERROR`. NULL 허용이면 도메인 타입도 일관되게 `T?`. **여러 컨버터가 있다면 동일 정책** — 한 번에 grep 으로 일치 여부 확인.
 
 ---
 
@@ -133,8 +133,11 @@ Grep "^import io\.lettuce\.|^import redis\." path=apps/stay-api/src/main/kotlin/
 | 멱등 흐름에서 카운터 음수 진입 | `decrement()` 가 가드 없음 |
 | 상태 전이가 `canTransitTo` 검증 없이 직접 set | `status = CANCELLED` 직접 대입 |
 | Map / Set 컬렉션 입력의 키 / 값 nullable 검증 누락 | `Map<K, V>` 의 V 가 null 통과 |
+| **상태 변경 → 검증 순서** — 변경을 먼저 하고 검증이 뒤에 오면 예외 시 부분 변경이 영속화 | `unmarkAsMain()` × N 후에 `create()` 가 예외 → main 플래그 사라짐 |
 
-**가드**: `init { require(...) }` 또는 `if (...) throw CoreException(ErrorType.X, "...")`. DB 제약은 *마지막* 방어선.
+**가드**:
+- `init { require(...) }` 또는 `if (...) throw CoreException(ErrorType.X, "...")`. DB 제약은 *마지막* 방어선.
+- **상태 변경 메서드의 순서**: 검증·생성 먼저, 상태 변경은 통과 후에. Aggregate 메서드가 도중에 예외를 던져도 객체는 일관된 상태로 남아야 함 (Strong Exception Safety / Copilot 패턴).
 
 ---
 
@@ -213,7 +216,7 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 
 ---
 
-### 1️⃣2️⃣ 예외 처리 / 에러 전략
+### 1️⃣2️⃣ 예외 처리 / 에러 전략 / Cause 체인 / 메시지 노출
 
 | 확인 | 위반 예 |
 |---|---|
@@ -221,10 +224,22 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 | catch 블록에서 로그만 찍고 swallow | "No-op except log" |
 | 도메인이 `RuntimeException` / `IllegalArgumentException` 을 직접 throw | `CoreException(ErrorType, ...)` 컨벤션 위반 |
 | `e.printStackTrace()` 사용 | 표준 로거 미사용 |
-| catch 후 새 예외 throw 시 `cause` 보존 안 함 | stack trace 단절 |
+| **catch 후 새 예외 throw 시 `cause` 보존 안 함** | stack trace 단절, 운영 디버깅 불가 |
 | `try { ... } catch { return null }` 형태 | 호출자가 실패 인지 못함 |
+| **외부 입력 / 외부 라이브러리 예외 메시지(`e.message`)를 사용자 응답에 노출** | 시스템 내부 정보 / 원본 데이터 / 스택 정보가 외부로 누출 — 보안 위험 |
+| catch 시 메시지 일반화 없이 raw 메시지 그대로 wrap | `CoreException(INTERNAL_ERROR, "JSON 파싱: ${e.message}")` → 응답에 `path[0].field` 등 내부 구조 노출 |
 
-**가드**: 도메인은 `CoreException(ErrorType, message)`. infrastructure 예외 catch 시 `cause` 보존하고 의미 있는 ErrorType 으로 재포장.
+**가드**:
+- **`CoreException(errorType, customMessage, cause)` 시그니처를 항상 사용** — `cause` 로 원인 보존.
+- **클라이언트 메시지는 일반화** ("정책 데이터 처리 실패"), **상세 원인은 로그로만** (`log.warn("...", e)`).
+- 외부 라이브러리 예외(`Jackson`, `JDBC`, `Redis`) 의 메시지는 `e.message` 를 customMessage 에 넣지 않는다. `cause` 로 보존하고 로그에서 추적.
+
+```kotlin
+} catch (e: Exception) {
+    log.warn("X 데이터 처리 실패. dbData='{}'", dbData, e)  // 상세는 로그
+    throw CoreException(ErrorType.INTERNAL_ERROR, "X 데이터 처리 실패", cause = e)  // 응답은 일반 메시지
+}
+```
 
 ---
 
@@ -282,6 +297,38 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 | `flush()` / `clear()` 직접 호출 | 영속성 컨텍스트 의도 깨짐 |
 
 **가드**: `@Transactional` = Facade 한 곳. Lazy 컬렉션은 Facade 내부에서만 접근.
+
+---
+
+### 1️⃣6️⃣-A 외부 입력 ↔ 내부 매핑 (Whitelisting)
+
+도메인 어휘(정렬 키, 필터 키, 카테고리 등) 가 인프라 / SQL / Spring 의 내부 식별자로 변환될 때
+**화이트리스트 없이 외부 입력이 그대로 흘러가면** 잘못된 path / 잘못된 SQL / 500 에러로 이어진다.
+
+| 확인 | 위반 예 |
+|---|---|
+| 정렬 키 매핑이 `map[key] ?: key` 형태로 미등록 키를 그대로 통과 | `?sort=password DESC` 가 `password` 컬럼 정렬 시도 → SQL 폭발 / 정보 노출 |
+| 도메인 정렬 키가 `@Embedded` VO 인데 매핑이 `vo` 만 (`vo.value` 누락) | `Sort.by("rating")` 이 `rating.value` 가 아니라 임베디드 객체로 정렬 시도 → 런타임 실패 |
+| 운영 RepositoryImpl 과 InMemory 더블의 미등록 키 정책이 다름 | 한쪽은 무시, 한쪽은 실패 — 테스트가 운영을 신뢰할 수 없음 |
+| 외부 입력 enum 매칭이 `valueOf` 직접 (예외 핸들링 없음) | `IllegalArgumentException` 이 500 으로 |
+
+**가드**:
+- **화이트리스트 + BAD_REQUEST 거절** — 미등록 키는 도메인이 받지 않는다. 운영 / 테스트 양쪽 동일 정책.
+- `@Embedded` VO 의 정렬 경로는 `vo.field` 형태로 명시 (`Rating` → `rating.value`).
+- enum 변환은 try/catch + BAD_REQUEST.
+
+```kotlin
+// 운영 RepositoryImpl
+private val ALLOWED_SORT_KEYS: Map<String, String> = mapOf(
+    "wishCount" to "wishCount",
+    "rating" to "rating.value",   // @Embedded → 내부 필드
+    "name" to "name.value",
+)
+
+private fun toSpringSort(keys: List<SortKey>): Sort = ...
+    val column = ALLOWED_SORT_KEYS[key.property]
+        ?: throw CoreException(ErrorType.BAD_REQUEST, "지원하지 않는 정렬 키: ${key.property}")
+```
 
 ---
 
