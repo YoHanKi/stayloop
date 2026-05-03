@@ -1,6 +1,6 @@
 ---
 name: create-pr
-description:
+description: |
   Stayloop 의 PR 생성을 일관된 컨벤션으로 보조하는 **수동 스킬**. 사용자가 "PR 만들어줘" 등으로
   명시적으로 요청할 때만 호출되며, 자동 게이트로 사용하지 않는다. 브랜치 명명, 변경 단위 정리,
   documents/feature/{topic}/pr.md 작성(첫 줄 PR title 포함), 커밋 메시지 prefix

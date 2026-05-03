@@ -1,6 +1,6 @@
 ---
 name: verify-code
-description:
+description: |
   Stayloop 기능 구현/리팩토링 직후, verify-architecture 보다 먼저 호출되어 코드 자체의 결함을 잡는 게이트.
   Copilot/시니어 리뷰가 자주 지적하는 패턴 — 불변식 보호 누락, null 일관성, 자식 entity ID 동기화,
   외부 라이브러리 누출, 컬렉션 정렬 결정성, 캐시-원본 불일치, 입력 검증 누락, 멱등 깨짐, 사일런트 디폴트,

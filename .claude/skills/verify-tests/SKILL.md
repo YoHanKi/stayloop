@@ -1,6 +1,6 @@
 ---
 name: verify-tests
-description:
+description: |
   Stayloop 기능 구현 직후 테스트의 충분성과 정합성을 점검하는 게이트.
   단위/통합/E2E 테스트 피라미드 충족 여부, 테스트 가능 구조, 테스트 더블의 역할 적합성,
   명세 표현(@DisplayName, given/when/then), 실패·경계 시나리오 누락, 그리고
