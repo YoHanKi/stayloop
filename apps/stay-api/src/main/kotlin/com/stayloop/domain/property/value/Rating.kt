@@ -11,7 +11,9 @@ import jakarta.persistence.Embeddable
  */
 @Embeddable
 data class Rating(
-    @Column(name = "rating", precision = 3, scale = 2, nullable = false)
+    // Hibernate 6.x 는 DOUBLE 컬럼에 `scale` 속성을 거절 (`scale has no meaning for SQL floating point types`).
+    // 평점은 0.00 ~ 5.00 의 소수 둘째 자리 정밀도가 본질이므로 DB 컬럼은 DECIMAL(3,2) 로 고정 (Geo.kt 와 동일 패턴).
+    @Column(name = "rating", columnDefinition = "DECIMAL(3,2)", nullable = false)
     val value: Double,
 ) {
     init {
