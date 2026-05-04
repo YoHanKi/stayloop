@@ -27,6 +27,21 @@ import java.time.LocalDateTime
  * 비교한다 (실 사용자식별은 `users.id` BIGINT 가 아니라 LoginId 값).
  *
  * **wishCount 동시 증감 정합성** 은 4주차 동시성 영역 — 본 라운드는 단순 read-modify-write.
+ *
+ * **Read-then-Write SELECT 중복 — 의식적 trade-off (verify-code §17)**
+ *
+ * `wish` 흐름은 `existsBy` (1+1 SELECT) → `save` (1 SELECT + INSERT) 로 사용자 행 SELECT 가 2회 발생한다
+ * (`WishlistRepositoryImpl` 이 `LoginId → users.id` 변환을 위해 `UserRepository.findByLoginId` 를 두 번 호출).
+ * `unwish` 도 `existsBy` → `deleteBy` 로 동일.
+ *
+ * 단일 쿼리로 통합하려면 두 가지 길이 있다:
+ * 1. `WishlistRepository.save` 시그니처에 *이미 변환된 `users.id`* 를 주입 — 도메인 boundary (LoginId 캡슐화) 훼손.
+ *    Facade 가 BIGINT 를 들고 다니게 되어 `feature/wishlist` PR #6 의 결정과 충돌.
+ * 2. JPA L2 cache 또는 transaction-scoped 사용자 캐시 도입 — 4주차 캐시 영역.
+ *
+ * **본 라운드 결정**: 단순한 read-modify-write 를 유지하고 SELECT 중복은 4주차 동시성/캐시 라운드에서
+ * 함께 다룬다. 단일 사용자 단발 토글 시나리오의 운영 부하는 낮으며, 4주차에 wishCount 동시 증감 정합성
+ * (`Property.wishCount` race window) 과 같이 보는 것이 합당.
  */
 @Service
 class WishlistFacade(

@@ -5,6 +5,7 @@ import com.stayloop.domain.inventory.DailyRoomInventoryRepository
 import com.stayloop.domain.property.PropertyRepository
 import com.stayloop.domain.property.RoomTypeRepository
 import com.stayloop.domain.rate.DailyRoomRateRepository
+import com.stayloop.domain.reservation.ReservationModel
 import com.stayloop.domain.reservation.ReservationRepository
 import com.stayloop.domain.reservation.ReservationService
 import com.stayloop.domain.reservation.value.PropertySnapshot
@@ -101,9 +102,7 @@ class ReservationFacade(
     fun cancel(loginId: LoginId, reservationId: Long): ReservationInfo {
         val reservation = reservationRepository.findById(reservationId)
             ?: throw CoreException(ErrorType.NOT_FOUND, "존재하지 않는 예약입니다.")
-        if (reservation.userId != loginId) {
-            throw CoreException(ErrorType.FORBIDDEN, "본인 예약만 취소할 수 있습니다.")
-        }
+        requireOwner(reservation, loginId, "취소")
 
         val period = reservation.period
         val inventories = inventoryRepository.findAllInRange(
@@ -129,9 +128,7 @@ class ReservationFacade(
     fun getReservation(loginId: LoginId, reservationId: Long): ReservationInfo {
         val reservation = reservationRepository.findById(reservationId)
             ?: throw CoreException(ErrorType.NOT_FOUND, "존재하지 않는 예약입니다.")
-        if (reservation.userId != loginId) {
-            throw CoreException(ErrorType.FORBIDDEN, "본인 예약만 조회할 수 있습니다.")
-        }
+        requireOwner(reservation, loginId, "조회")
         return ReservationInfo.from(reservation)
     }
 
@@ -142,4 +139,16 @@ class ReservationFacade(
     @Transactional(readOnly = true)
     fun getMyReservations(loginId: LoginId, period: StayPeriod): List<ReservationInfo> =
         reservationRepository.findByUserId(loginId, period).map(ReservationInfo::from)
+
+    /**
+     * 본인 자원 인가 가드 — `reservation.userId == loginId` 가 아니면 FORBIDDEN.
+     * 도메인 서비스는 `X-Loopers-LoginId` 를 모르므로 인가는 Application Layer 책임 (CLAUDE.md / verify-architecture).
+     *
+     * @param action  메시지에 노출되는 행위명 (`"취소"` / `"조회"` 등). 외부 식별자는 박지 않는다 — verify-code §12.
+     */
+    private fun requireOwner(reservation: ReservationModel, loginId: LoginId, action: String) {
+        if (reservation.userId != loginId) {
+            throw CoreException(ErrorType.FORBIDDEN, "본인 예약만 ${action}할 수 있습니다.")
+        }
+    }
 }
