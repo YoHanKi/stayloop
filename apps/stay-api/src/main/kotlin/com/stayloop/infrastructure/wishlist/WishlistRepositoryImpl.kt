@@ -1,21 +1,21 @@
 package com.stayloop.infrastructure.wishlist
 
+import com.querydsl.jpa.impl.JPAQueryFactory
 import com.stayloop.domain.common.value.PageQuery
 import com.stayloop.domain.user.UserRepository
 import com.stayloop.domain.user.value.LoginId
+import com.stayloop.domain.wishlist.QWishlistModel
 import com.stayloop.domain.wishlist.WishlistId
 import com.stayloop.domain.wishlist.WishlistModel
 import com.stayloop.domain.wishlist.WishlistRepository
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
 import org.slf4j.LoggerFactory
-import org.springframework.data.domain.PageRequest
-import org.springframework.data.domain.Sort
 import org.springframework.stereotype.Component
 import java.time.LocalDateTime
 
 /**
- * 도메인 `WishlistRepository` 의 인프라 어댑터. JpaRepository 위임 + `LoginId ↔ users.id` 변환.
+ * 도메인 `WishlistRepository` 의 인프라 어댑터. JpaRepository 위임 + QueryDSL + `LoginId ↔ users.id` 변환.
  *
  * **변환 책임**: 도메인 boundary 의 `LoginId` 는 본 클래스에서만 `users.id` (Long) 로 풀린다 —
  * 도메인 / Facade 호출자는 BIGINT 를 모른다 (`docs/plan/week2-3.md §⑥`).
@@ -26,11 +26,15 @@ import java.time.LocalDateTime
  *   직행하므로 `LoginId` 를 박지 않는다 (verify-code §12 / §18). 식별자 필요 시 서버 로그에만.
  * - `deleteBy` — silent noop. `findById(...).ifPresent { delete(it) }` 1회 SELECT (verify-code §17 — 부재 허용
  *   가드가 쿼리 횟수를 늘리지 않게).
+ *
+ * **`findByUserId` 는 QueryDSL** — `wishedAt DESC` 고정 정렬 (`page.sort` 비어있지 않으면 BAD_REQUEST 거절).
+ * 문자열 JPQL `@Query` 우회로 type-safe 경로 + 정렬 결정성 (verify-code §4 / §17).
  */
 @Component
 class WishlistRepositoryImpl(
     private val jpa: WishlistJpaRepository,
     private val users: UserRepository,
+    private val queryFactory: JPAQueryFactory,
 ) : WishlistRepository {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -61,8 +65,14 @@ class WishlistRepositoryImpl(
             throw CoreException(ErrorType.BAD_REQUEST, SORT_NOT_SUPPORTED_MESSAGE)
         }
         val resolved = users.findByLoginId(userId)?.id ?: return emptyList()
-        val pageable = PageRequest.of(page.page, page.size, Sort.by(Sort.Direction.DESC, "wishedAt"))
-        return jpa.findByUserId(resolved, pageable).content
+        val w = QWishlistModel.wishlistModel
+        return queryFactory
+            .selectFrom(w)
+            .where(w.userId.eq(resolved))
+            .orderBy(w.wishedAt.desc())
+            .offset((page.page.toLong()) * page.size.toLong())
+            .limit(page.size.toLong())
+            .fetch()
     }
 
     companion object {
