@@ -89,6 +89,45 @@ CLAUDE.md / week1.md 의 "테스트 가능한 구조" 기준에 따른다. 다�
 
 ---
 
+### 4️⃣-A 테스트명 ↔ 실제 동작 정합 (Name-Behavior Parity)
+
+`@DisplayName` / 함수명은 테스트의 **계약**이다. 자연어로 약속한 동작과 어설션이 검증하는 동작이 *같은 것* 이어야 한다. 어긋나면 회귀 가드가 *침묵* 하고, 명세를 신뢰한 후임이 잘못된 가정으로 변경한다 (verify-code §19-B 와 한 쌍).
+
+| 확인 | 위반 예 |
+|---|---|
+| **DisplayName 이 "정렬" / "순서" / "DESC" / "ASC" / "최신순" / "오래된 순" 을 약속하는데 어설션이 `containsExactlyInAnyOrder` / `hasSize` / `containsAll` 로 순서 미검증** | "wishedAt DESC 순으로 반환" 인데 `containsExactlyInAnyOrder(first.id, second.id)` — 정렬이 깨져도 통과. fixedClock 으로 동률이라 어쩔 수 없다는 *주석* 이 있어도, 그러면 DisplayName 을 "조회 성공" 으로 완화하거나 seed 시각을 분리해 진짜 순서를 검증해야 함 — 둘 중 하나로 정합 |
+| **DisplayName 이 cardinality 를 약속 ("N건 반환" / "빈 리스트" / "단건 / 중복 없음") 인데 어설션이 명시 검증 없음** | "두 건만 반환" 인데 `assertThat(result).isNotEmpty()` 로 끝 — 3건/0건이어도 통과 |
+| **DisplayName 이 ErrorType / 인가 정책 ("BAD_REQUEST" / "FORBIDDEN" / "본인 자원만") 을 약속하는데 어설션이 `instanceof CoreException` 만 검증** | ErrorType 정책 회귀(FORBIDDEN → NOT_FOUND 등) 가 silent. `extracting("errorType").isEqualTo(ErrorType.X)` 까지 봐야 정책 가드 |
+| **DisplayName 이 부수효과 ("저장된다" / "삭제된다" / "1 증가" / "1 감소") 를 약속하는데 어설션이 반환값만 검증** | "wishCount 가 1 증가" 인데 `info.wishCount == 1` 만 보고 `properties.findById(id).wishCount` 미확인 → 캐시 SSOT 깨져도 통과 |
+| **DisplayName 이 "멱등" / "두 번 호출해도" 를 약속하는데 실제 호출이 1회** | 멱등 회귀가 안 잡힘 |
+| **DisplayName 이 상태 전이 ("취소된다" / "확정된다") 를 약속하는데 상태 어설션 없음** | 반환값만 보고 entity 상태 미검증 |
+| **DisplayName 이 부정형 ("거절한다" / "변경되지 않는다" / "없으면 noop") 인데 *변경되지 않은 측의 상태* 를 어설션 안 함** | "예외 시 부분 변경 없음" 인데 예외만 검증하고 상태 불변 미검증 — Strong Exception Safety 회귀 사각지대 |
+| **`assertThatThrownBy { ... }` 블록이 두 개 이상인데 각 블록의 어설션 강도가 다름** | 첫 블록은 `errorType` 까지, 두 번째는 `instanceof` 만 — 같은 실패 카테고리인데 회귀 가드 비대칭 |
+| **DisplayName 에 *복수 케이스* 가 묶여 있는데 (`@ValueSource` / `@CsvSource`) 일부 케이스만 들어있음** | "공백 / 100자 초과 거절" 인데 `@ValueSource(strings = [" "])` 만 — 100자 케이스 누락이 안 보임 |
+| **함수명(camelCase) 과 DisplayName(한국어) 이 서로 다른 동작을 묘사** | `shouldRejectAnotherUserAccess` + `"FORBIDDEN 으로 거절한다"` 는 정합. 그러나 함수명은 "Reject" 인데 DisplayName 은 "noop 으로 통과" 면 의도 불명 |
+
+**가드**:
+- DisplayName 의 *모든* 동사·정책·cardinality 가 어설션으로 1:1 검증되는지 본다 — 자연어 단어 → 어설션 매핑이 가능해야 한다.
+- 정렬·순서를 약속하면 `containsExactly(...)` / `extracting(...).containsExactly(...)` / `isSortedAccordingTo(comparator)` 사용. seed 가 동률이면 동률이 *안 나오게* (offset Clock / Repository 직접 호출로 다른 timestamp seed) 분리하거나, DisplayName 을 "조회 성공" 으로 완화 — 둘 중 하나.
+- ErrorType 명이 DisplayName 에 들어가면 `extracting("errorType").isEqualTo(ErrorType.X)` 까지 봐야 한다 (verify-code §19-B 와 동일 기준).
+- 부수효과 (저장 / 삭제 / 증가 / 감소 / 상태 전이) 를 약속하면 *반환값* + *영속 상태* 둘 다 어설션. 캐시 컬럼 (`wishCount`, `mainImageUrl`) 도 별도 어설션 — SSOT 회귀 사각지대.
+- "변경되지 않는다" / "noop" / "거절" 같은 부정형 약속은 *변경되지 않은 측의 상태* 를 어설션. `assertThat(properties.findById(id).wishCount).isEqualTo(0)` 처럼.
+- 복수 케이스는 `@ParameterizedTest` 의 `@ValueSource` / `@CsvSource` 가 *DisplayName 에 적힌 모든 케이스* 를 덮는지 본다. `@ParameterizedTest(name = "...")` 의 인자 표시도 활용.
+
+**점검 명령** (회귀 라운드 / Round N):
+```
+Grep "containsExactlyInAnyOrder|isNotEmpty|hasSize\(\)|containsAll" path=apps/.../test glob="*Test.kt"
+→ 같은 메서드의 @DisplayName 에 "정렬|순서|DESC|ASC|최신순|N건|개수" 단어가 있는지 교차 검증
+
+Grep "assertThatThrownBy" path=apps/.../test glob="*Test.kt"
+→ 같은 메서드의 @DisplayName 에 ErrorType 명이 있는지, 어설션이 errorType 까지 보는지 확인
+
+Grep "@DisplayName.*\"" path=apps/.../test glob="*Test.kt"
+→ DisplayName 의 동사·정책·cardinality 단어를 추출 후 본문 어설션과 1:1 매핑 가능한지 점검
+```
+
+---
+
 ### 5️⃣ 실패·경계 시나리오 누락 점검
 
 성공 경로만 있는 테스트는 신뢰를 주지 않는다. 다음 카테고리를 **각 기능마다** 점검한다.

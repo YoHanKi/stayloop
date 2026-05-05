@@ -1,0 +1,294 @@
+package com.stayloop.application.property
+
+import com.stayloop.application.property.command.PropertySearchCriteria
+import com.stayloop.application.property.command.PropertySortKey
+import com.stayloop.application.property.command.RoomAvailabilityQuery
+import com.stayloop.domain.common.value.Money
+import com.stayloop.domain.common.value.PageQuery
+import com.stayloop.domain.inventory.DailyRoomInventoryModel
+import com.stayloop.domain.property.PropertyModel
+import com.stayloop.domain.property.RoomTypeModel
+import com.stayloop.domain.property.value.Address
+import com.stayloop.domain.property.value.Amenities
+import com.stayloop.domain.property.value.BedConfig
+import com.stayloop.domain.property.value.BedType
+import com.stayloop.domain.property.value.CancellationPolicy
+import com.stayloop.domain.property.value.CancellationType
+import com.stayloop.domain.property.value.GuestCount
+import com.stayloop.domain.property.value.Name
+import com.stayloop.domain.property.value.PropertyCategory
+import com.stayloop.domain.property.value.PropertyPolicy
+import com.stayloop.domain.rate.DailyRoomRateModel
+import com.stayloop.domain.rate.ReservationPriceCalculator
+import com.stayloop.domain.reservation.value.StayPeriod
+import com.stayloop.support.error.CoreException
+import com.stayloop.support.error.ErrorType
+import com.stayloop.support.test.InMemoryDailyRoomInventoryRepository
+import com.stayloop.support.test.InMemoryDailyRoomRateRepository
+import com.stayloop.support.test.InMemoryPropertyRepository
+import com.stayloop.support.test.InMemoryRoomTypeRepository
+import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.DisplayName
+import org.junit.jupiter.api.Test
+import java.time.LocalDate
+import java.time.LocalTime
+
+class PropertyFacadeTest {
+    private lateinit var properties: InMemoryPropertyRepository
+    private lateinit var roomTypes: InMemoryRoomTypeRepository
+    private lateinit var inventories: InMemoryDailyRoomInventoryRepository
+    private lateinit var rates: InMemoryDailyRoomRateRepository
+    private lateinit var sut: PropertyFacade
+
+    @BeforeEach
+    fun setUp() {
+        properties = InMemoryPropertyRepository()
+        roomTypes = InMemoryRoomTypeRepository()
+        inventories = InMemoryDailyRoomInventoryRepository()
+        rates = InMemoryDailyRoomRateRepository()
+        sut = PropertyFacade(
+            propertyRepository = properties,
+            roomTypeRepository = roomTypes,
+            inventoryRepository = inventories,
+            rateRepository = rates,
+            priceCalculator = ReservationPriceCalculator(),
+        )
+    }
+
+    @DisplayName("search 는 가용 객실이 1개 이상인 숙소만 반환하고 최저 합산가를 노출한다 (AC-1, AC-2).")
+    @Test
+    fun shouldReturnPropertiesWithAvailableRoomsAndLowestTotalPrice() {
+        val seoulProperty = saveProperty(name = "강남호텔", city = "SEOUL")
+        val standard = saveRoomType(propertyId = seoulProperty.id, name = "스탠다드", baseGuests = 2, maxGuests = 2)
+        val deluxe = saveRoomType(propertyId = seoulProperty.id, name = "디럭스", baseGuests = 2, maxGuests = 4)
+        val period = StayPeriod(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 3))
+        seedAllDates(standard.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 80_000)
+        seedAllDates(deluxe.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 120_000)
+
+        // 강남호텔 SEOUL — 가용 객실 2개, 최저 합산가 = 80_000 × 2박 = 160_000
+        val saturated = saveProperty(name = "포화호텔", city = "SEOUL")
+        val saturatedRoom = saveRoomType(propertyId = saturated.id, name = "트윈", baseGuests = 2, maxGuests = 2)
+        seedAllDates(saturatedRoom.id, period, totalRooms = 1, reservedRooms = 1, pricePerNight = 90_000)
+
+        // 다른 도시 — 검색 도시가 SEOUL 이므로 제외
+        val busanProperty = saveProperty(name = "해운대리조트", city = "BUSAN")
+        val busanRoom = saveRoomType(propertyId = busanProperty.id, name = "오션뷰", baseGuests = 2, maxGuests = 2)
+        seedAllDates(busanRoom.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 200_000)
+
+        val result = sut.search(
+            PropertySearchCriteria(
+                city = "SEOUL",
+                period = period,
+                guestCount = 2,
+                page = PageQuery(page = 0, size = 20),
+                sortKey = PropertySortKey.RECOMMENDED,
+            ),
+        )
+
+        // SEOUL 매칭 2건 중 가용 객실이 있는 강남호텔만 결과에 포함 (AC-2)
+        assertThat(result.content).hasSize(1)
+        assertThat(result.total).isEqualTo(2L) // total 은 도시 매칭 행 수 — 가용 0 제외 전 기준
+        val info = result.content.first()
+        assertThat(info.propertyId).isEqualTo(seoulProperty.id)
+        assertThat(info.lowestTotalPrice).isEqualTo(Money.of(160_000)) // 80_000 × 2박
+        assertThat(info.lowestPricePerNight).isEqualTo(Money.of(80_000))
+        assertThat(info.availableRoomTypeCount).isEqualTo(2)
+    }
+
+    @DisplayName("search 는 인원 수가 maxGuests 를 초과하는 객실 타입을 가용에서 제외한다.")
+    @Test
+    fun shouldExcludeRoomTypeWithGuestCountOverMax() {
+        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+        val small = saveRoomType(propertyId = property.id, name = "싱글", baseGuests = 1, maxGuests = 1)
+        val large = saveRoomType(propertyId = property.id, name = "패밀리", baseGuests = 2, maxGuests = 4)
+        val period = StayPeriod(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 3))
+        seedAllDates(small.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 50_000)
+        seedAllDates(large.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 150_000)
+
+        val result = sut.search(
+            PropertySearchCriteria(
+                city = "SEOUL",
+                period = period,
+                guestCount = 3,
+                page = PageQuery(page = 0, size = 20),
+            ),
+        )
+
+        // 3명 → 싱글(max=1) 제외, 패밀리(max=4) 만 가용 → 합산가 150_000 × 2 = 300_000
+        val info = result.content.single()
+        assertThat(info.lowestTotalPrice).isEqualTo(Money.of(300_000))
+        assertThat(info.availableRoomTypeCount).isEqualTo(1)
+    }
+
+    @DisplayName("search 는 일자별 재고 누락 / 재고 0 / 요금 누락 객실을 가용에서 제외한다.")
+    @Test
+    fun shouldExcludeRoomTypeWithMissingInventoryOrZeroAvailability() {
+        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+        val period = StayPeriod(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 3))
+
+        // (a) 재고 누락 — 6/1 만 등록, 6/2 누락
+        val missing = saveRoomType(propertyId = property.id, name = "재고누락", baseGuests = 2, maxGuests = 2)
+        inventories.save(DailyRoomInventoryModel.create(missing.id, period.checkIn, totalRooms = 5))
+        rates.save(DailyRoomRateModel.create(missing.id, period.checkIn, Money.of(50_000)))
+        rates.save(DailyRoomRateModel.create(missing.id, period.checkIn.plusDays(1), Money.of(50_000)))
+
+        // (b) 재고 0 — 모든 일자 totalRooms == reservedRooms
+        val full = saveRoomType(propertyId = property.id, name = "재고0", baseGuests = 2, maxGuests = 2)
+        seedAllDates(full.id, period, totalRooms = 1, reservedRooms = 1, pricePerNight = 50_000)
+
+        // (c) 요금 누락 — 재고는 있는데 6/2 요금이 없음
+        val noRate = saveRoomType(propertyId = property.id, name = "요금누락", baseGuests = 2, maxGuests = 2)
+        period.datesToReserve().forEach { date ->
+            inventories.save(DailyRoomInventoryModel.create(noRate.id, date, totalRooms = 5))
+        }
+        rates.save(DailyRoomRateModel.create(noRate.id, period.checkIn, Money.of(50_000)))
+
+        val result = sut.search(
+            PropertySearchCriteria(
+                city = "SEOUL",
+                period = period,
+                guestCount = 2,
+                page = PageQuery(page = 0, size = 20),
+            ),
+        )
+
+        // 모두 가용 0 → 결과에서 Property 자체가 제외됨 (AC-2)
+        assertThat(result.content).isEmpty()
+    }
+
+    @DisplayName("search 는 city 가 비어 있으면 BAD_REQUEST 로 거절한다.")
+    @Test
+    fun shouldRejectBlankCity() {
+        val period = StayPeriod(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 3))
+        assertThatThrownBy {
+            sut.search(
+                PropertySearchCriteria(
+                    city = "  ",
+                    period = period,
+                    guestCount = 2,
+                    page = PageQuery(page = 0, size = 20),
+                ),
+            )
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
+
+    @DisplayName("search 는 RECOMMENDED 외 sort 키는 BAD_REQUEST 로 거절한다 (silent ignore 금지).")
+    @Test
+    fun shouldRejectUnsupportedSortKey() {
+        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+        val period = StayPeriod(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 3))
+        saveRoomType(propertyId = property.id, name = "스탠다드", baseGuests = 2, maxGuests = 2)
+
+        assertThatThrownBy {
+            sut.search(
+                PropertySearchCriteria(
+                    city = "SEOUL",
+                    period = period,
+                    guestCount = 2,
+                    page = PageQuery(page = 0, size = 20),
+                    sortKey = PropertySortKey.PRICE_ASC,
+                ),
+            )
+        }.isInstanceOf(CoreException::class.java)
+            .hasMessageContaining("RECOMMENDED")
+    }
+
+    @DisplayName("getDetail 은 존재하지 않는 propertyId 에 NOT_FOUND 를 던진다.")
+    @Test
+    fun shouldThrowNotFoundOnUnknownPropertyId() {
+        assertThatThrownBy { sut.getDetail(999L) }
+            .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.NOT_FOUND)
+    }
+
+    @DisplayName("getDetail 은 Property 정적 정보 + 객실 타입 목록을 반환한다.")
+    @Test
+    fun shouldReturnDetail() {
+        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+        saveRoomType(propertyId = property.id, name = "스탠다드", baseGuests = 2, maxGuests = 2)
+        saveRoomType(propertyId = property.id, name = "디럭스", baseGuests = 2, maxGuests = 4)
+
+        val info = sut.getDetail(property.id)
+
+        assertThat(info.propertyId).isEqualTo(property.id)
+        assertThat(info.name).isEqualTo("강남호텔")
+        assertThat(info.city).isEqualTo("SEOUL")
+        assertThat(info.roomTypes).hasSize(2)
+        assertThat(info.roomTypes.map { it.name }).containsExactlyInAnyOrder("스탠다드", "디럭스")
+    }
+
+    @DisplayName("getAvailableRooms 는 가용 / 인원 초과 / 재고 부족 / 일자 누락을 사유와 함께 노출한다.")
+    @Test
+    fun shouldReturnRoomAvailabilityWithReason() {
+        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+        val ok = saveRoomType(propertyId = property.id, name = "OK", baseGuests = 2, maxGuests = 2)
+        val tooSmall = saveRoomType(propertyId = property.id, name = "1인용", baseGuests = 1, maxGuests = 1)
+        val full = saveRoomType(propertyId = property.id, name = "FULL", baseGuests = 2, maxGuests = 2)
+        val period = StayPeriod(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 3))
+        seedAllDates(ok.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 100_000)
+        seedAllDates(tooSmall.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 50_000)
+        seedAllDates(full.id, period, totalRooms = 1, reservedRooms = 1, pricePerNight = 100_000)
+
+        val results = sut.getAvailableRooms(
+            RoomAvailabilityQuery(propertyId = property.id, period = period, guestCount = 2),
+        )
+
+        val byName = results.associateBy { it.name }
+        assertThat(byName["OK"]?.available).isTrue()
+        assertThat(byName["OK"]?.totalPrice).isEqualTo(Money.of(200_000))
+        assertThat(byName["OK"]?.pricePerNight).isEqualTo(Money.of(100_000))
+        assertThat(byName["1인용"]?.available).isFalse()
+        assertThat(byName["1인용"]?.unavailableReason).contains("최대 인원")
+        assertThat(byName["FULL"]?.available).isFalse()
+        assertThat(byName["FULL"]?.unavailableReason).contains("재고")
+    }
+
+    private fun saveProperty(name: String, city: String): PropertyModel {
+        val property = PropertyModel.create(
+            name = Name(name),
+            category = PropertyCategory.HOTEL,
+            description = "테스트용 숙소",
+            address = Address(city = city, fullAddress = "$city 어딘가 123"),
+            amenities = Amenities.EMPTY,
+            policy = PropertyPolicy(
+                checkInTime = LocalTime.of(15, 0),
+                checkOutTime = LocalTime.of(11, 0),
+                cancellation = CancellationPolicy(type = CancellationType.FREE_UNTIL, freeUntilDaysBefore = 3),
+            ),
+        )
+        return properties.save(property)
+    }
+
+    private fun saveRoomType(propertyId: Long, name: String, baseGuests: Int, maxGuests: Int): RoomTypeModel {
+        val roomType = RoomTypeModel.create(
+            propertyId = propertyId,
+            name = Name(name),
+            guestCount = GuestCount(base = baseGuests, max = maxGuests),
+            bedConfig = BedConfig.of(BedType.DOUBLE to 1),
+        )
+        return roomTypes.save(roomType)
+    }
+
+    private fun seedAllDates(
+        roomTypeId: Long,
+        period: StayPeriod,
+        totalRooms: Int,
+        reservedRooms: Int,
+        pricePerNight: Long,
+    ) {
+        period.datesToReserve().forEach { date ->
+            inventories.save(
+                DailyRoomInventoryModel.create(
+                    roomTypeId = roomTypeId,
+                    date = date,
+                    totalRooms = totalRooms,
+                    reservedRooms = reservedRooms,
+                ),
+            )
+            rates.save(DailyRoomRateModel.create(roomTypeId, date, Money.of(pricePerNight)))
+        }
+    }
+}
