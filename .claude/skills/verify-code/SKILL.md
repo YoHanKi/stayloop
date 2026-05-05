@@ -559,9 +559,25 @@ query.sort.map { comparatorFor(it.property, it.direction) }
 
 ---
 
-### 1️⃣9️⃣-B 테스트 명세성 (DisplayName ↔ 실제 검증 범위)
+### 1️⃣9️⃣-B 문서 ↔ 실제 동작 정합 (Doc-Behavior Parity)
 
-`@DisplayName` 은 테스트의 **명세 문서** 다. 실제 검증 범위와 어긋나면 명세가 거짓말한다.
+KDoc / `@DisplayName` / 주석은 **명세 문서** 다. 실제 동작과 어긋나면 *문서가 거짓말* 이 된다 — 호출자·리뷰어·후임이 잘못 신뢰한다.
+
+세 영역으로 나누어 본다:
+
+#### (1) KDoc / 주석의 약속 ↔ 실제 가드·구현
+
+| 확인 | 위반 예 |
+|---|---|
+| **KDoc / 주석의 강한 약속(`차단한다` / `보장한다` / `방지한다` / `불가능`) 과 실제 가드 불일치** | "Int overflow 차단" 이라고 적혀 있는데 실제로는 size 상한만 있고 page 가드 없음 — 문서가 *거짓말*. 호출자/리뷰어가 잘못 신뢰 |
+| **메서드 KDoc 의 *흐름 설명* (numbered steps / "1." "2." "3.") 과 실제 호출 순서·시그니처 불일치** | KDoc (2): "각 Property 의 RoomType 목록 조회 (`findAllByPropertyIds` 묶음)" 라고 batch 조회를 약속하는데, 실제 구현은 `for property → roomTypeRepository.findByPropertyId(property.id)` N+1. 문서는 batch 인 줄 알고 운영 부하 산정·후임 리팩토링 의사결정이 어긋남 |
+| **KDoc 의 미완성 문장 / 끊긴 bullet** | "5. 가용 객실 중 *최저 합산가* 선택 — Property 단위 대표가" — `대표가` 뒤가 잘림. 의미 불완전 → 회귀 시 해당 단계의 *원래 의도* 를 후임이 추측 |
+| **KDoc 의 "고정" / "비어있어야 함" 같은 강한 정책 약속이 실제 가드 부재** | "정렬은 wishedAt DESC 고정 (page.sort 비어있어야 함)" 이라고 했지만 Facade 가 `require(page.sort.isEmpty())` 가드 없이 그대로 Repository 로 전달 — Repository 단에서 막아도 Facade 계약이 모호해지고, 다른 호출자(테스트 / 다른 Facade) 가 신뢰할 기준이 흐려짐 |
+| **KDoc 가 명시적 실패 (`NOT_FOUND` / `INTERNAL_ERROR`) 를 약속하지만, 구현은 `mapNotNull` / `?.let` 로 silent skip** | "누락된 Property 는 NOT_FOUND" 라고 적혀 있는데 `wishes.mapNotNull { properties[wish.propertyId]?.let { ... } }` 로 조용히 제외 — 운영에서 데이터 정합 깨짐을 *드러내지 않음* |
+| **KDoc 의 트랜잭션·락·재시도 약속이 실제 어노테이션·코드와 불일치** | "낙관적 락" 이라고 했는데 `@Version` 없음 / "재시도 3회" 인데 `@Retryable` 없음 |
+| **KDoc 가 가리키는 외부 문서(`docs/...`) 의 §번호가 실제 문서에 없거나 의미가 다름** | `docs/design/02-sequence-diagram.md §1` 인용했는데 §1 이 다른 시퀀스 / 문서가 갱신되지 않음 |
+
+#### (2) `@DisplayName` ↔ 실제 검증 범위
 
 | 확인 | 위반 예 |
 |---|---|
@@ -571,12 +587,39 @@ query.sort.map { comparatorFor(it.property, it.direction) }
 | 한국어 자연어와 코드 동작이 시제·주체가 어긋남 (수동/능동, 거절/허용) | 명세 신뢰 저하 |
 | **DisplayName 은 "INTERNAL_ERROR 로 거절" 이라고 명시했는데, 어설션이 `instanceof CoreException` 만 검증** | ErrorType 정책이 바뀌어도(BAD_REQUEST 로 변경 등) 테스트가 통과 — silent policy drift |
 | **`assertThatThrownBy { ... }` 블록이 두 개 이상인데 각 블록의 어설션 강도가 다름** | 첫 블록은 `errorType` 까지, 두 번째는 `instanceof` 만 — 같은 실패 카테고리인데 회귀 가드 비대칭 |
-| **KDoc / 주석의 강한 약속(`차단한다` / `보장한다` / `방지한다` / `불가능`) 과 실제 가드 불일치** | "Int overflow 차단" 이라고 적혀 있는데 실제로는 size 상한만 있고 page 가드 없음 — 문서가 *거짓말*. 호출자/리뷰어가 잘못 신뢰 |
+| **DisplayName 이 "정렬" / "순서" / "DESC" / "ASC" / "최신순" / "오래된 순" 을 약속하는데 어설션이 `containsExactlyInAnyOrder` / `hasSize` / `containsAll` 로 순서 미검증** | "wishedAt DESC 순으로 반환" 인데 `containsExactlyInAnyOrder(first.id, second.id)` — 정렬이 깨져도 통과. fixedClock 으로 동률이라 어쩔 수 없다는 *주석* 이 있어도, 그러면 DisplayName 을 "조회 성공" 으로 완화하거나 seed 시각을 분리해 진짜 순서를 검증해야 함 — 둘 중 하나로 정합 |
+| **DisplayName 이 "N건 반환" / "빈 리스트" / "단건" 처럼 cardinality 를 약속하는데 어설션이 `hasSize` / `isEmpty` / `hasSize(1)` 로 명시 검증 안 함** | 결과가 의도와 다른 size 여도 통과 |
+| **DisplayName 이 "본인 자원만 조회" / "FORBIDDEN" 같은 인가 정책을 약속하는데 어설션이 ErrorType 까지 보지 않음** | 정책 회귀(FORBIDDEN → NOT_FOUND 등) 가 silent |
+
+#### (3) 서로 다른 진실 원천(KDoc / DisplayName / `.github/instructions` / Repository 인터페이스 KDoc) 간 충돌
+
+| 확인 | 위반 예 |
+|---|---|
+| Repository 인터페이스 KDoc 에는 "BAD_REQUEST 로 거절" 이 명시되어 있는데, 그 위 Facade KDoc 은 "고정" 만 적고 거절 동작은 침묵 | 호출자가 두 문서 중 어느 쪽을 믿어야 할지 불명확 — 위쪽(Facade) 도 동일 정책을 명시해야 정합 |
+| 운영 RepositoryImpl KDoc 과 InMemory 더블 KDoc 의 정책 표현이 다름 | 한쪽만 읽은 후임이 잘못된 가정으로 변경 |
+| `.github/instructions/*.md` 의 룰과 실제 KDoc 약속이 모순 | 두 진실 원천이 충돌 — 양쪽 동기화 필요 |
 
 **가드**:
+- KDoc 의 numbered flow 는 *실제 메서드 호출 / 시그니처* 와 1:1 로 대응한다. batch / N+1 / 트랜잭션 / 락 같은 *운영 의사결정에 영향* 가는 표현은 특히 정확해야 함. 표현 갭이 있으면 (a) KDoc 를 실제 동작에 맞추거나, (b) KDoc 의도대로 구현을 변경 — 둘 중 한 쪽으로 강제 정합.
+- KDoc 의 *미완성 문장* 은 ktlint / Detekt 가 잡지 않는다 — 회귀 라운드에서 변경 파일의 KDoc 를 *전체 읽기* 해서 끊긴 bullet · "단어 뒤가" 같은 문장 종결 누락을 grep 한다.
+- "고정" / "비어있어야 함" / "반드시" / "보장" 같은 정책 약속은 *Facade / 진입점* 에서 `require(...)` 또는 명시적 `throw` 가드로 박는다. Repository 가드만으로는 Facade 호출 계약이 모호해진다.
+- KDoc 가 `NOT_FOUND` / `INTERNAL_ERROR` 같은 에러 정책을 약속하면 `mapNotNull` / `?.let` / `try { } catch { return ... }` 같은 silent skip 패턴은 위반.
 - DisplayName 은 *실제로 검증되는 케이스만* 적는다. 추가 케이스는 별도 `@Test` 또는 `@ParameterizedTest` 로 분리하고 각각 자기 DisplayName 을 가진다.
-- **DisplayName 에 ErrorType 명(`BAD_REQUEST` / `INTERNAL_ERROR` / `CONFLICT` / `UNAUTHORIZED`) 이 들어가면, 어설션도 반드시 `extracting("errorType").isEqualTo(ErrorType.X)` 까지 본다.** instanceof 만으로는 정책 회귀가 안 잡힌다 (verify-tests 게이트의 명세성 점검과 한 쌍).
+- **DisplayName 에 ErrorType 명(`BAD_REQUEST` / `INTERNAL_ERROR` / `CONFLICT` / `UNAUTHORIZED` / `FORBIDDEN`) 이 들어가면, 어설션도 반드시 `extracting("errorType").isEqualTo(ErrorType.X)` 까지 본다.** instanceof 만으로는 정책 회귀가 안 잡힌다 (verify-tests 게이트의 명세성 점검과 한 쌍).
+- **DisplayName 에 정렬·순서 단어가 들어가면 `containsExactly` / `isSortedAccordingTo(comparator)` / `extracting(...).containsExactly(...)` 로 순서를 검증한다.** seed 가 동률이면 동률이 *안 나오게* 분리하거나, DisplayName 을 "조회 성공" 으로 완화 — 둘 중 하나.
 - 한 테스트 안에 `assertThatThrownBy` 블록이 여러 개라면 *모든 블록* 이 같은 어설션 강도를 가진다 — 한 쪽만 강하면 비대칭 회귀 사각지대.
+
+**점검 명령** (KDoc 정합 일괄 검토):
+```
+Grep "차단|보장|방지|불가능|고정|비어있어야|반드시" path=apps/.../main glob="*.kt"
+→ 각 약속의 위치를 보고 *같은 파일 / 같은 메서드 본문* 에 대응 가드가 있는지 대조
+
+Grep "^\s*\*\s*\d+\.\s" path=apps/.../main glob="*.kt"
+→ KDoc 의 numbered step 추출 후 메서드 본문의 호출 시그니처와 1:1 대조
+
+Grep "containsExactlyInAnyOrder" path=apps/.../test glob="*Test.kt"
+→ 같은 테스트의 @DisplayName 에 "정렬|순서|DESC|ASC|최신순" 단어가 있는지 교차
+```
 
 ---
 
@@ -683,7 +726,7 @@ verify-tests 게이트가 그 테스트를 강제 — 두 게이트는 한 쌍.
 분량이 많기 때문에 모든 항목을 동등하게 다루지 않는다. 변경 단위와 무관하게 우선 검토:
 
 - **P0 (반드시 차단)**: §1 Null 일관성 / §2 자식 Entity 식별자 / §3 외부 라이브러리 누출 / §6 입력 검증 / §16 트랜잭션 / §18 보안
-- **P1 (강한 권고)**: §5 캐시 SSOT / §7 멱등성 / §9 동시성 / §11 시간 / §12 예외 (특히 메시지에 외부 식별자 노출) / §15 가시성 / §16-A 외부 입력 매핑 (silent ignore 포함) / §17 성능 (Read-then-Write SELECT 중복 / `@Table(indexes=...)` PK 중복)
+- **P1 (강한 권고)**: §5 캐시 SSOT / §7 멱등성 / §9 동시성 / §11 시간 / §12 예외 (특히 메시지에 외부 식별자 노출) / §15 가시성 / §16-A 외부 입력 매핑 (silent ignore 포함) / §17 성능 (Read-then-Write SELECT 중복 / `@Table(indexes=...)` PK 중복) / §19-B 문서-동작 정합 (KDoc 흐름 ↔ 구현, DisplayName ↔ 어설션, 미완성 문장)
 - **P2 (권고)**: §4 결정성 (tie-breaker) / §8 사일런트 디폴트 / §10 자원 / §13 매직 상수 / §14 DRY / §19 어휘
 
 P0 위반 1건도 FAIL. P1 / P2 는 누적 정도와 영향 범위로 판단.
