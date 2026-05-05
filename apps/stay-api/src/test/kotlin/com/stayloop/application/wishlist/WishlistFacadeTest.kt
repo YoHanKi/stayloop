@@ -1,6 +1,8 @@
 package com.stayloop.application.wishlist
 
 import com.stayloop.domain.common.value.PageQuery
+import com.stayloop.domain.common.value.SortDirection
+import com.stayloop.domain.common.value.SortKey
 import com.stayloop.domain.property.PropertyModel
 import com.stayloop.domain.property.value.Address
 import com.stayloop.domain.property.value.Amenities
@@ -27,6 +29,7 @@ import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import java.time.Clock
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import com.stayloop.domain.user.value.Name as UserName
@@ -136,17 +139,47 @@ class WishlistFacadeTest {
     @Test
     fun shouldReturnMyWishesSortedByWishedAtDesc() {
         val user = saveUser("alen01")
-        val first = saveProperty(name = "강남호텔")
-        val second = saveProperty(name = "해운대리조트")
-        sut.wish(user.loginId, first.id)
-        // fixedClock 이라 같은 시각이지만 second.id 가 더 큰 → propertyId tie-break 없이 같은 wishedAt 이면
-        // InMemory 의 sortedByDescending 안정 정렬에 의존. 본 테스트는 *목록 size + 두 항목이 모두 포함* 만 검증.
-        sut.wish(user.loginId, second.id)
+        val older = saveProperty(name = "강남호텔")
+        val newer = saveProperty(name = "해운대리조트")
+        // sut.wish 는 fixedClock 으로 같은 시각이 되어 정렬 검증이 무의미해진다.
+        // Repository 에 직접 *서로 다른 wishedAt* 으로 seed 해 DESC 순서를 회귀 가드로 박는다
+        // (verify-tests §4-A — DisplayName 의 "DESC 순" 약속과 어설션 정합).
+        wishes.save(user.loginId, older.id, LocalDateTime.parse("2026-05-04T10:00:00"))
+        wishes.save(user.loginId, newer.id, LocalDateTime.parse("2026-05-04T11:00:00"))
 
         val items = sut.getMyWishes(user.loginId, user.loginId, PageQuery(0, 20))
 
-        assertThat(items).hasSize(2)
-        assertThat(items.map { it.propertyId }).containsExactlyInAnyOrder(first.id, second.id)
+        assertThat(items.map { it.propertyId }).containsExactly(newer.id, older.id)
+    }
+
+    @DisplayName("getMyWishes 는 page.sort 가 비어있지 않으면 BAD_REQUEST 로 거절한다.")
+    @Test
+    fun shouldRejectNonEmptySortAsBadRequest() {
+        val user = saveUser("alen01")
+
+        assertThatThrownBy {
+            sut.getMyWishes(
+                loginId = user.loginId,
+                targetUserId = user.loginId,
+                page = PageQuery(0, 20, listOf(SortKey("wishedAt", SortDirection.ASC))),
+            )
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
+
+    @DisplayName("getMyWishes 는 wishlist 행이 가리키는 Property 가 누락되면 INTERNAL_ERROR 로 명시 실패한다.")
+    @Test
+    fun shouldFailExplicitlyWhenReferencedPropertyMissing() {
+        val user = saveUser("alen01")
+        val existing = saveProperty(name = "강남호텔")
+        // 존재하지 않는 propertyId 로 직접 wishlist 행 seed — 데이터 정합 깨짐 시뮬레이션.
+        wishes.save(user.loginId, existing.id, LocalDateTime.parse("2026-05-04T10:00:00"))
+        wishes.save(user.loginId, 9_999L, LocalDateTime.parse("2026-05-04T11:00:00"))
+
+        assertThatThrownBy {
+            sut.getMyWishes(user.loginId, user.loginId, PageQuery(0, 20))
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.INTERNAL_ERROR)
     }
 
     private val encoder = FakePasswordEncoder()

@@ -43,10 +43,12 @@ class PropertyFacade(
      *
      * 흐름:
      * 1. `propertyRepository.findByCity(city, page)` — 도시 기준 Property 페이지 조회
-     * 2. 각 Property 의 RoomType 목록 조회 (`findAllByPropertyIds` 묶음)
-     * 3. **각 RoomType** 마다 기간 [checkIn, checkOut) 의 inventory / rate 조회 (N+1 영역)
+     * 2. **각 Property 마다** `roomTypeRepository.findByPropertyId(property.id)` 로 RoomType 목록 조회
+     *    — N+1 영역. 본 라운드는 의식적으로 단순화하고 4주차에 `findAllByPropertyIdIn` batch 로 전환
+     *    (verify-code §17 / `docs/plan/week2-3.md §⑧`)
+     * 3. **각 RoomType** 마다 기간 [checkIn, checkOut) 의 inventory / rate 조회 — 동일 N+1 영역
      * 4. 가용성 판정 — 모든 일자에 inventory 존재 + `available > 0` + `maxGuests >= guestCount`
-     * 5. 가용 객실 중 *최저 합산가* 선택 — Property 단위 대표가
+     * 5. 가용 객실 중 *최저 합산가* 선택 — Property 단위 대표가로 사용 (AC-2 의 "최저가" 표현)
      * 6. **가용 객실 0 인 Property 는 결과에서 제외** (AC-2)
      * 7. **`page.total` 은 *전체* 매칭 행 수** — 가용 0 제외 후의 size 가 아니라 도시 매칭 size 로 기재. AC-1
      *    의 페이지 의미를 도시 기준으로 유지 (가용성은 일시적 상태).
