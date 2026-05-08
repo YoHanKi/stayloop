@@ -2,12 +2,9 @@ package com.stayloop.domain.coupon
 
 import com.stayloop.domain.BaseEntity
 import com.stayloop.domain.coupon.value.CouponIssueStatus
-import com.stayloop.domain.user.value.LoginId
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
-import jakarta.persistence.AttributeOverride
 import jakarta.persistence.Column
-import jakarta.persistence.Embedded
 import jakarta.persistence.Entity
 import jakarta.persistence.EnumType
 import jakarta.persistence.Enumerated
@@ -15,14 +12,19 @@ import jakarta.persistence.Table
 import java.time.LocalDateTime
 
 /**
- * 발급된 쿠폰 인스턴스 Aggregate Root. (`docs/plan/week4.md` ① Phase A-4, `docs/plan/week4/decision.md` D-2)
+ * 발급된 쿠폰 인스턴스 Aggregate Root. (`docs/plan/week4.md` ① Phase A-4 / A-5, `docs/plan/week4/decision.md` D-2)
  *
  * 사용자가 *발급받아 1회 사용하는 쿠폰*. `CouponTemplate` (정책) 과 분리된 별 Aggregate — 생명주기 / 소유권 /
  * 동시성 자원이 다르다.
  *
+ * **`userId` 는 `users.id` (BIGINT FK)** — `LoginId` 직접 임베드가 아니다 (`Wishlist` 패턴 답습;
+ * `Reservation` 의 LoginId 박제와 다른 결정). 인덱스 효율 (BIGINT 8 byte vs VARCHAR 가변) + 사용자별 통계 /
+ * 페이지네이션이 빈번한 *집계 자원* 의 자연 결과. boundary 는 여전히 `LoginId` 이며,
+ * `LoginId ↔ users.id` 변환은 `CouponIssueRepositoryImpl` (그리고 InMemory 더블) 의 책임.
+ *
  * 박제 컬럼:
  * - `templateId` (FK) — `CouponTemplate.id` 참조 (소프트 FK, JPA `@ManyToOne` 미사용 — Aggregate 경계)
- * - `userId: LoginId` (Embedded) — 본인 자원 인가에 사용
+ * - `userId` (FK BIGINT) — `users.id`
  * - `status: CouponIssueStatus` — AVAILABLE / USED / EXPIRED (3 상태)
  * - `issuedAt` — 발급 시각 (정렬 / 통계 기준)
  * - `usedAt?` — 사용 시각 (USED 시점 박제)
@@ -40,7 +42,7 @@ import java.time.LocalDateTime
 @Table(name = "coupon_issues")
 class CouponIssueModel internal constructor(
     templateId: Long,
-    userId: LoginId,
+    userId: Long,
     issuedAt: LocalDateTime,
 ) : BaseEntity() {
 
@@ -48,9 +50,8 @@ class CouponIssueModel internal constructor(
     var templateId: Long = templateId
         protected set
 
-    @Embedded
-    @AttributeOverride(name = "value", column = Column(name = "user_login_id", nullable = false, length = 20))
-    var userId: LoginId = userId
+    @Column(name = "user_id", nullable = false)
+    var userId: Long = userId
         protected set
 
     @Enumerated(EnumType.STRING)
@@ -66,13 +67,16 @@ class CouponIssueModel internal constructor(
     var usedAt: LocalDateTime? = null
         protected set
 
-    @Column(name = "used_reservation_id", nullable = true)
+    @Column(name = "used_reservation_id", nullable = true, unique = true)
     var usedReservationId: Long? = null
         protected set
 
     init {
         if (templateId <= 0L) {
             throw CoreException(ErrorType.BAD_REQUEST, "templateId 는 양수여야 합니다.")
+        }
+        if (userId <= 0L) {
+            throw CoreException(ErrorType.BAD_REQUEST, "userId 는 양수여야 합니다 (영속화된 User 의 id).")
         }
     }
 
@@ -89,7 +93,7 @@ class CouponIssueModel internal constructor(
      * - `usedAt = now`
      * - `usedReservationId = reservationId`
      */
-    fun use(actor: LoginId, reservationId: Long, now: LocalDateTime) {
+    fun use(actor: Long, reservationId: Long, now: LocalDateTime) {
         requireOwner(actor)
         if (!status.canTransitTo(CouponIssueStatus.USED)) {
             throw CoreException(
@@ -122,7 +126,7 @@ class CouponIssueModel internal constructor(
         status = CouponIssueStatus.EXPIRED
     }
 
-    private fun requireOwner(actor: LoginId) {
+    private fun requireOwner(actor: Long) {
         if (this.userId != actor) {
             throw CoreException(ErrorType.FORBIDDEN, "본인 소유의 쿠폰이 아닙니다.")
         }
@@ -132,11 +136,11 @@ class CouponIssueModel internal constructor(
         private const val STATUS_COLUMN_LENGTH: Int = 20
 
         /**
-         * 발급 팩토리. 호출자(`CouponFacade.issue`) 는 *영속화된* 템플릿을 넘긴다 (id > 0 보장).
+         * 발급 팩토리. 호출자(`CouponFacade.issue`) 는 *영속화된* 템플릿의 id 를 넘긴다 (id > 0 보장).
          * 만료된 정책으로의 발급은 본 팩토리에서 가드 — `template.requireUsable(now)` 를 호출자가 책임진다
          * (모델은 templateId 만 받으므로 정책 검증 책임은 Facade 영역).
          */
-        fun issue(templateId: Long, userId: LoginId, issuedAt: LocalDateTime): CouponIssueModel =
+        fun issue(templateId: Long, userId: Long, issuedAt: LocalDateTime): CouponIssueModel =
             CouponIssueModel(
                 templateId = templateId,
                 userId = userId,

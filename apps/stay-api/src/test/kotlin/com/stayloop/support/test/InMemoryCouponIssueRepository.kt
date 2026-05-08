@@ -4,6 +4,7 @@ import com.stayloop.domain.BaseEntity
 import com.stayloop.domain.common.value.PageQuery
 import com.stayloop.domain.coupon.CouponIssueModel
 import com.stayloop.domain.coupon.CouponIssueRepository
+import com.stayloop.domain.user.UserRepository
 import com.stayloop.domain.user.value.LoginId
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
@@ -12,10 +13,16 @@ import com.stayloop.support.error.ErrorType
  * 테스트용 InMemory `CouponIssueRepository`. 운영 RepositoryImpl 과 **동일 의미론** —
  * - `findByUserId` 정렬 고정 `issuedAt DESC, id DESC`
  * - `page.sort` 비어있지 않으면 BAD_REQUEST (verify-code §16-A silent ignore 차단)
+ * - boundary 는 `LoginId`, 내부 저장은 `users.id` (BIGINT FK) — `Wishlist` 패턴 답습
+ *
+ * 운영-테스트 동치성을 위해 `UserRepository` 를 주입받아 `LoginId ↔ users.id` 변환을 동일하게 수행한다
+ * (verify-code §19-A — 더블이 운영보다 단순화하면 회귀 사각지대).
  *
  * id 자동 할당은 reflection — 다른 InMemory 더블 패턴 답습 (테스트 fake 한정 트레이드오프).
  */
-class InMemoryCouponIssueRepository : CouponIssueRepository {
+class InMemoryCouponIssueRepository(
+    private val users: UserRepository,
+) : CouponIssueRepository {
     private val store = mutableMapOf<Long, CouponIssueModel>()
     private var sequence = 0L
 
@@ -36,8 +43,9 @@ class InMemoryCouponIssueRepository : CouponIssueRepository {
                 "쿠폰 목록 조회는 정렬 입력을 받지 않습니다 (issuedAt DESC 고정).",
             )
         }
+        val resolved = users.findByLoginId(userId)?.id ?: return emptyList()
         return store.values
-            .filter { it.userId == userId }
+            .filter { it.userId == resolved }
             .sortedWith(
                 compareByDescending<CouponIssueModel> { it.issuedAt }
                     .thenByDescending { it.id },
