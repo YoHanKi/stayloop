@@ -9,6 +9,7 @@ import jakarta.persistence.Entity
 import jakarta.persistence.EnumType
 import jakarta.persistence.Enumerated
 import jakarta.persistence.Table
+import jakarta.persistence.UniqueConstraint
 import java.time.LocalDateTime
 
 /**
@@ -39,7 +40,15 @@ import java.time.LocalDateTime
  * 일반화) 하므로 도달하지 않지만, 외부 진입점 / 미래 다른 호출자가 가드를 빠뜨려도 도메인이 자기 자신을 지킨다.**
  */
 @Entity
-@Table(name = "coupon_issues")
+@Table(
+    name = "coupon_issues",
+    uniqueConstraints = [
+        UniqueConstraint(
+            name = "uk_coupon_issues_used_reservation_id",
+            columnNames = ["used_reservation_id"],
+        ),
+    ],
+)
 class CouponIssueModel internal constructor(
     templateId: Long,
     userId: Long,
@@ -67,7 +76,7 @@ class CouponIssueModel internal constructor(
     var usedAt: LocalDateTime? = null
         protected set
 
-    @Column(name = "used_reservation_id", nullable = true, unique = true)
+    @Column(name = "used_reservation_id", nullable = true)
     var usedReservationId: Long? = null
         protected set
 

@@ -11,6 +11,7 @@ import jakarta.persistence.Column
 import jakarta.persistence.Embedded
 import jakarta.persistence.Entity
 import jakarta.persistence.Table
+import jakarta.persistence.UniqueConstraint
 import java.time.LocalDateTime
 
 /**
@@ -36,7 +37,12 @@ import java.time.LocalDateTime
  *   (A-6 박제) — 도메인 서비스 = 순수 함수 + Aggregate 객체 = 자기 상태 가드.
  */
 @Entity
-@Table(name = "coupon_templates")
+@Table(
+    name = "coupon_templates",
+    uniqueConstraints = [
+        UniqueConstraint(name = "uk_coupon_templates_code", columnNames = ["code"]),
+    ],
+)
 class CouponTemplateModel internal constructor(
     code: String,
     name: CouponName,
@@ -45,7 +51,7 @@ class CouponTemplateModel internal constructor(
     minOrderAmount: MinOrderAmount? = null,
 ) : BaseEntity() {
 
-    @Column(name = "code", nullable = false, length = MAX_CODE_LENGTH, unique = true)
+    @Column(name = "code", nullable = false, length = MAX_CODE_LENGTH)
     var code: String = code
         protected set
 
