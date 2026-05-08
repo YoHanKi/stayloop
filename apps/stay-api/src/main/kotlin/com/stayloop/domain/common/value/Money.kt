@@ -22,12 +22,16 @@ data class Money(
 
     operator fun plus(other: Money): Money = Money(amount + other.amount)
 
+    operator fun minus(other: Money): Money = Money(amount - other.amount)
+
     operator fun times(multiplier: Int): Money {
         if (multiplier < 0) {
             throw CoreException(ErrorType.BAD_REQUEST, "배수는 음수가 될 수 없습니다.")
         }
         return Money(amount * multiplier)
     }
+
+    operator fun compareTo(other: Money): Int = amount.compareTo(other.amount)
 
     fun isZero(): Boolean = amount == 0L
 
