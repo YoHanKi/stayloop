@@ -25,7 +25,7 @@ import jakarta.persistence.Embedded
 @Embeddable
 data class MinOrderAmount(
     @Embedded
-    @AttributeOverride(name = "amount", column = Column(name = "min_order_amount", nullable = false))
+    @AttributeOverride(name = "amount", column = Column(name = "min_order_amount", nullable = true))
     val value: Money,
 ) {
     init {
