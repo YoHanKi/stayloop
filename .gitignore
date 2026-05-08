@@ -65,5 +65,12 @@ documents/blog
 **/src/test/java/**/benchmark
 **/src/test/java/**/verification
 
+### experiment tests (일회성 가설 검증, 결과 박제 후 삭제 — CLAUDE.md "실험 테스트" 정책) ###
+# 트레이드오프 결정 (락 전략 / timeout 값 / JPA 옵션 등) 의 실측 검증용. 실험 코드는 `.gitignore`,
+# 결과만 `docs/plan/week{n}/decision.md` 또는 `db-lock-low-level.md` 의 *실험 검증* 절에 박제.
+**/src/test/kotlin/**/experiment/
+**/src/test/kotlin/**/benchmark/
+**/src/test/kotlin/**/verification/
+
 ### local performance tests (k6 등 체크리스트 외 성능 테스트) ###
 k6/local/
