@@ -86,6 +86,33 @@ class CouponTemplateModel internal constructor(
         expirationPeriod.requireUsable(now)
     }
 
+    /**
+     * 어드민 정책 수정 — 전체 필드 갱신. 부분 갱신 (PATCH) 은 본 라운드 미지원.
+     *
+     * 각 인자는 *이미 검증된 VO* 를 받음 (Facade 가 raw 입력으로부터 VO 인스턴스화 시 가드 발동).
+     * `code` 는 비공백 + `MAX_CODE_LENGTH` 자 제한 — init 가드와 동일 검증.
+     */
+    fun update(
+        code: String,
+        name: CouponName,
+        discountValue: DiscountValue,
+        expirationPeriod: ExpirationPeriod,
+        minOrderAmount: MinOrderAmount?,
+    ) {
+        if (code.isBlank() || code.length > MAX_CODE_LENGTH) {
+            throw CoreException(
+                ErrorType.BAD_REQUEST,
+                "쿠폰 코드는 1~${MAX_CODE_LENGTH}자의 비공백 문자열이어야 합니다.",
+            )
+        }
+        // 검증 통과 후 변경 (Strong Exception Safety)
+        this.code = code
+        this.name = name
+        this.discountValue = discountValue
+        this.expirationPeriod = expirationPeriod
+        this.minOrderAmount = minOrderAmount
+    }
+
     companion object {
         const val MAX_CODE_LENGTH: Int = 50
 

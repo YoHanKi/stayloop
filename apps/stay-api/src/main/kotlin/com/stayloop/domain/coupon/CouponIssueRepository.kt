@@ -35,4 +35,15 @@ interface CouponIssueRepository {
      * `page.sort` 가 비어있지 않으면 BAD_REQUEST.
      */
     fun findByUserId(userId: LoginId, page: PageQuery): List<CouponIssueModel>
+
+    /**
+     * 어드민 — 특정 템플릿의 발급 이력. `issuedAt DESC, id DESC` 고정 정렬.
+     * `page.sort` 비어있지 않으면 BAD_REQUEST.
+     */
+    fun findByTemplateId(templateId: Long, page: PageQuery): List<CouponIssueModel>
+
+    /**
+     * 어드민 — 특정 템플릿에 대한 발급 이력 존재 여부. delete 가드용.
+     */
+    fun existsByTemplateId(templateId: Long): Boolean
 }

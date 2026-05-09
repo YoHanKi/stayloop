@@ -50,6 +50,29 @@ class CouponIssueRepositoryImpl(
             .fetch()
     }
 
+    override fun findByTemplateId(templateId: Long, page: PageQuery): List<CouponIssueModel> {
+        if (page.sort.isNotEmpty()) {
+            throw CoreException(ErrorType.BAD_REQUEST, SORT_NOT_SUPPORTED_MESSAGE)
+        }
+        val i = QCouponIssueModel.couponIssueModel
+        return queryFactory
+            .selectFrom(i)
+            .where(i.templateId.eq(templateId))
+            .orderBy(i.issuedAt.desc(), i.id.desc())
+            .offset(page.page.toLong() * page.size.toLong())
+            .limit(page.size.toLong())
+            .fetch()
+    }
+
+    override fun existsByTemplateId(templateId: Long): Boolean {
+        val i = QCouponIssueModel.couponIssueModel
+        return queryFactory
+            .selectOne()
+            .from(i)
+            .where(i.templateId.eq(templateId))
+            .fetchFirst() != null
+    }
+
     companion object {
         private const val SORT_NOT_SUPPORTED_MESSAGE =
             "쿠폰 목록은 issuedAt DESC 로 고정 정렬되며, 사용자 정의 정렬을 지원하지 않습니다."

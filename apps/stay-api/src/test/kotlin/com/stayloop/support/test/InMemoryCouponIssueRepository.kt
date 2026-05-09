@@ -54,6 +54,26 @@ class InMemoryCouponIssueRepository(
             .take(page.limit)
     }
 
+    override fun findByTemplateId(templateId: Long, page: PageQuery): List<CouponIssueModel> {
+        if (page.sort.isNotEmpty()) {
+            throw CoreException(
+                ErrorType.BAD_REQUEST,
+                "쿠폰 발급 이력 조회는 정렬 입력을 받지 않습니다 (issuedAt DESC 고정).",
+            )
+        }
+        return store.values
+            .filter { it.templateId == templateId }
+            .sortedWith(
+                compareByDescending<CouponIssueModel> { it.issuedAt }
+                    .thenByDescending { it.id },
+            )
+            .drop(page.offset)
+            .take(page.limit)
+    }
+
+    override fun existsByTemplateId(templateId: Long): Boolean =
+        store.values.any { it.templateId == templateId }
+
     private fun assignId(issue: CouponIssueModel, id: Long) {
         val field = BaseEntity::class.java.getDeclaredField("id")
         field.isAccessible = true

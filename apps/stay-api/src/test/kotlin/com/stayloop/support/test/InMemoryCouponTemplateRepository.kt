@@ -1,8 +1,11 @@
 package com.stayloop.support.test
 
 import com.stayloop.domain.BaseEntity
+import com.stayloop.domain.common.value.PageQuery
 import com.stayloop.domain.coupon.CouponTemplateModel
 import com.stayloop.domain.coupon.CouponTemplateRepository
+import com.stayloop.support.error.CoreException
+import com.stayloop.support.error.ErrorType
 
 /**
  * 테스트용 InMemory `CouponTemplateRepository`. 운영 RepositoryImpl 과 **동일 의미론** —
@@ -32,6 +35,23 @@ class InMemoryCouponTemplateRepository : CouponTemplateRepository {
         if (ids.isEmpty()) return emptyList()
         val idSet = ids.toSet()
         return store.values.filter { it.id in idSet }
+    }
+
+    override fun findAll(page: PageQuery): List<CouponTemplateModel> {
+        if (page.sort.isNotEmpty()) {
+            throw CoreException(
+                ErrorType.BAD_REQUEST,
+                "쿠폰 템플릿 목록 조회는 정렬 입력을 받지 않습니다 (id DESC 고정).",
+            )
+        }
+        return store.values
+            .sortedByDescending { it.id }
+            .drop(page.offset)
+            .take(page.limit)
+    }
+
+    override fun deleteById(id: Long) {
+        store.remove(id)
     }
 
     private fun assignId(template: CouponTemplateModel, id: Long) {
