@@ -28,6 +28,12 @@ class InMemoryCouponTemplateRepository : CouponTemplateRepository {
     override fun findByCode(code: String): CouponTemplateModel? =
         store.values.firstOrNull { it.code == code }
 
+    override fun findAllByIds(ids: Collection<Long>): List<CouponTemplateModel> {
+        if (ids.isEmpty()) return emptyList()
+        val idSet = ids.toSet()
+        return store.values.filter { it.id in idSet }
+    }
+
     private fun assignId(template: CouponTemplateModel, id: Long) {
         val field = BaseEntity::class.java.getDeclaredField("id")
         field.isAccessible = true

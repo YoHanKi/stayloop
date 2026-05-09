@@ -25,4 +25,10 @@ class CouponTemplateRepositoryImpl(
         val t = QCouponTemplateModel.couponTemplateModel
         return queryFactory.selectFrom(t).where(t.code.eq(code)).fetchOne()
     }
+
+    override fun findAllByIds(ids: Collection<Long>): List<CouponTemplateModel> {
+        if (ids.isEmpty()) return emptyList()
+        val t = QCouponTemplateModel.couponTemplateModel
+        return queryFactory.selectFrom(t).where(t.id.`in`(ids)).fetch()
+    }
 }

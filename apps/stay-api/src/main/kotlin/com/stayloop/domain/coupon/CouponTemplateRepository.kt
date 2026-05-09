@@ -25,4 +25,12 @@ interface CouponTemplateRepository {
      * `code` 단건 조회 — UNIQUE 제약이 1행 보장. 없으면 null.
      */
     fun findByCode(code: String): CouponTemplateModel?
+
+    /**
+     * 다수 id 배치 조회. 입력 순서 보존하지 않으며 (호출자가 `associateBy { id }` 로 정렬),
+     * 누락된 id 는 결과에서 빠진다 (호출자가 누락 정책 결정).
+     *
+     * `getMyCoupons` 의 N+1 회피용 — 페이지 크기만큼만 1회 IN 쿼리.
+     */
+    fun findAllByIds(ids: Collection<Long>): List<CouponTemplateModel>
 }
