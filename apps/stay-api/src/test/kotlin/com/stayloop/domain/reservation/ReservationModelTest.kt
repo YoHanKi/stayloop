@@ -1,6 +1,8 @@
 package com.stayloop.domain.reservation
 
 import com.stayloop.domain.common.value.Money
+import com.stayloop.domain.coupon.value.DiscountType
+import com.stayloop.domain.reservation.value.CouponSnapshot
 import com.stayloop.domain.reservation.value.GuestInfo
 import com.stayloop.domain.reservation.value.PropertySnapshot
 import com.stayloop.domain.reservation.value.ReservationStatus
@@ -149,11 +151,107 @@ class ReservationModelTest {
         assertThat(reservation.cancelledAt).isEqualTo(cancelledAtBefore)
     }
 
+    @DisplayName("쿠폰 미적용 — priceBeforeDiscount 가 totalPrice 와 같고 discountAmount = 0 이며 couponSnapshot 이 null 이다.")
+    @Test
+    fun shouldDefaultToNoCoupon() {
+        val reservation = newReservation()
+
+        assertThat(reservation.priceBeforeDiscount).isEqualTo(Money.of(220_000L))
+        assertThat(reservation.discountAmount).isEqualTo(Money.ZERO)
+        assertThat(reservation.totalPrice).isEqualTo(Money.of(220_000L))
+        assertThat(reservation.couponSnapshot).isNull()
+        assertThat(reservation.couponId).isNull()
+    }
+
+    @DisplayName("쿠폰 적용 — couponSnapshot 박제 + 산술 (priceBeforeDiscount - discountAmount = totalPrice).")
+    @Test
+    fun shouldAcceptCouponedReservation() {
+        val reservation = newReservation(
+            priceBeforeDiscount = Money.of(220_000L),
+            discountAmount = Money.of(20_000L),
+            totalPrice = Money.of(200_000L),
+            couponSnapshot = sampleCouponSnapshot(),
+        )
+
+        assertThat(reservation.couponSnapshot).isNotNull
+        assertThat(reservation.couponId).isEqualTo(42L)
+    }
+
+    @DisplayName("산술 불일치 — totalPrice ≠ priceBeforeDiscount - discountAmount 면 BAD_REQUEST.")
+    @Test
+    fun shouldReject_whenArithmeticInconsistent() {
+        assertThatThrownBy {
+            newReservation(
+                priceBeforeDiscount = Money.of(220_000L),
+                discountAmount = Money.of(20_000L),
+                // 정합 산술상 totalPrice 는 200_000 이어야 함
+                totalPrice = Money.of(150_000L),
+                couponSnapshot = sampleCouponSnapshot(),
+            )
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
+
+    @DisplayName("불일치 — discountAmount = 0 인데 couponSnapshot 박제가 존재하면 BAD_REQUEST.")
+    @Test
+    fun shouldReject_whenZeroDiscountWithCouponSnapshot() {
+        assertThatThrownBy {
+            newReservation(
+                priceBeforeDiscount = Money.of(220_000L),
+                discountAmount = Money.ZERO,
+                totalPrice = Money.of(220_000L),
+                couponSnapshot = sampleCouponSnapshot(),
+            )
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
+
+    @DisplayName("불일치 — discountAmount > 0 인데 couponSnapshot 박제가 비어 있으면 BAD_REQUEST.")
+    @Test
+    fun shouldReject_whenPositiveDiscountWithoutCouponSnapshot() {
+        assertThatThrownBy {
+            newReservation(
+                priceBeforeDiscount = Money.of(220_000L),
+                discountAmount = Money.of(20_000L),
+                totalPrice = Money.of(200_000L),
+                couponSnapshot = null,
+            )
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
+
+    @DisplayName("할인이 결제 금액을 초과하면 BAD_REQUEST — 환급 형태 차단.")
+    @Test
+    fun shouldReject_whenDiscountExceedsBefore() {
+        assertThatThrownBy {
+            // Money.minus 가드가 먼저 발동할 수 있어 totalPrice 자체가 음수로 만들어지지 않게 입력 제어.
+            // 단순히 산술 정합 실패로 BAD_REQUEST 가 발동하는지만 확인.
+            newReservation(
+                priceBeforeDiscount = Money.of(100_000L),
+                discountAmount = Money.of(120_000L),
+                totalPrice = Money.of(0L),
+                couponSnapshot = sampleCouponSnapshot(),
+            )
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
+
+    private fun sampleCouponSnapshot(): CouponSnapshot = CouponSnapshot(
+        couponId = 42L,
+        couponName = "여름 휴가 시즌 10% 할인",
+        couponCode = "SUMMER10",
+        discountType = DiscountType.RATE,
+    )
+
     private fun newReservation(
         propertyId: Long = 7L,
         roomTypeId: Long = 11L,
         guestCount: Int = 2,
         maxGuests: Int = 4,
+        priceBeforeDiscount: Money = Money.of(220_000L),
+        discountAmount: Money = Money.ZERO,
+        totalPrice: Money = Money.of(220_000L),
+        couponSnapshot: CouponSnapshot? = null,
     ): ReservationModel = ReservationModel.create(
         userId = LoginId("alpha01"),
         property = PropertySnapshot(
@@ -173,6 +271,9 @@ class ReservationModelTest {
         ),
         guestCount = guestCount,
         guest = GuestInfo(name = "홍길동", phoneNumber = PhoneNumber("010-1234-5678")),
-        totalPrice = Money.of(220_000L),
+        totalPrice = totalPrice,
+        priceBeforeDiscount = priceBeforeDiscount,
+        discountAmount = discountAmount,
+        couponSnapshot = couponSnapshot,
     )
 }
