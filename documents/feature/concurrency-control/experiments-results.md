@@ -331,3 +331,140 @@ E-1 ATOMIC 표 라벨 + PESS deadlock 라벨 + E-2 DEFAULT 원인 분리 + E-3 f
 - `E7r1_TrueConcurrentVersionExperimentTest.kt`
 
 CLAUDE.md "실험 테스트" 5-step 의 step 5 (코드 삭제) + `experiment-recurse` SKILL §5.9 정합. 박제된 결과가 SSOT.
+
+---
+
+# 4주차 ③ Phase A — 비관적 락 합류 실측 + 결정 박제 (2026-05-10 완료)
+
+> **목적**. Phase 0 의 *실험 측정* 박제 위에서 *실 구현* 의 합류 결과 + plan 변형 결정을 git-추적 SSOT 으로 박제. Phase 0 가 *가설 검증* 영역이라면 본 섹션은 *구현 합류* 영역 — 실 코드 변경이 운영 정합성을 어떻게 만족 / 변형했는지 박제.
+>
+> **연결된 결정**. `docs/plan/week4/decision.md` D-10 / D-11 / D-12 (gitignored 로컬 SSOT). 본 박제는 그 *git-추적 가시화*.
+>
+> **실행 환경**. 2026-05-10, Docker Desktop 27.3.1 / Testcontainers 1.20.6 / MySQL 8.0 (`innodb_lock_wait_timeout=50`, `transaction_isolation=REPEATABLE-READ`) / HikariCP `maximumPoolSize=10, connectionTimeout=3s` (test profile) / Windows 11.
+
+## A-Result-1. NOWAIT 미적용 결정 — latch-동기화 simultaneous 도착의 pathological case
+
+### 배경
+- Phase 0 E-2 의 박제는 *분산 부하* (k6 ramp-up 60s) 환경에서 NOWAIT (`jakarta.persistence.lock.timeout=0`) 강제 채택 (`fast-follow #1`).
+- 본 Phase A-4 의 `ConcurrentReservationTest` 는 `CountDownLatch(1)` + `start.countDown()` 으로 10 thread 를 *exactly simultaneous* 출발 — Phase 0 와 *다른 도착 분포*.
+
+### 실측 raw — NOWAIT 적용 시점 (1차 시도)
+- 환경: `setLockMode(PESSIMISTIC_WRITE) + setHint("jakarta.persistence.lock.timeout", 0)` (NOWAIT)
+- 결과: **10 thread 모두 동시 시각 (`15:09:11.535/.536`) 에 `LockTimeoutException` 으로 거절**
+- `successes=0 / conflicts=10 / others=0`
+- 모든 thread 의 SQL: `select ... for update nowait` → `Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.`
+
+### 가설 ↔ 측정 어긋남
+- **가설**: 1 thread 가 lock 획득, 9 thread 즉시 fail (Phase 0 E-2 의 분산 도착 결과의 일반화).
+- **측정**: `successes=0` — 모든 thread 가 동시에 fail.
+- **원인**: MySQL InnoDB lock manager 가 *exactly simultaneous* (nanosecond 단위) 도착 요청을 처리할 때, NOWAIT 는 *대기 큐에 자기 자신이 있어도* 즉시 거절. 분산 도착 (jitter 가 자연 발생) 에서는 발생하지 않는 *pathological case*.
+
+### 채택 결정 — NOWAIT 제거, default 50s 의존
+- 환경: `setLockMode(PESSIMISTIC_WRITE)` 만 (NOWAIT hint 제거)
+- 결과: `successes=1 / conflicts=9 / others=0` — 가설 충족.
+- 흐름: 첫 thread 가 lock 획득 → reserveOne → commit (~수ms) → lock 해제 → 후속 thread 들이 lock 획득 → `reserveOne()` 의 가용 0 가드 발동 → CONFLICT.
+
+### 영구 한계 (Phase 0 E-2 와 정합)
+- *exactly simultaneous* 도착 환경에서의 NOWAIT 다회 trial / 분포 측정 미진행.
+- 5주차+ 부하 라운드에서 (a) k6 ramp-up (분산 도착) (b) latch staggered (인공 worst case 의 완화) (c) 멀티 trial — 셋 다 통과 시점에 NOWAIT 재합류 결정.
+
+### 운영 합의
+- 본 라운드는 **default `innodb_lock_wait_timeout=50s`** 의존.
+- 모바일 30s timeout 가정에서는 *late-arrival* thread 가 50s 안에 lock 획득 후 CONFLICT 응답을 받기 어려울 수 있음 — 모바일 측 30s timeout 이 먼저 만료되어 client 가 retry. 5주차+ 부하 시점 결정의 *알려진 미해결 위험*.
+
+### 참조
+- `apps/stay-api/src/main/kotlin/com/stayloop/domain/inventory/DailyRoomInventoryRepository.kt` (KDoc "NOWAIT 미적용" 섹션)
+- `apps/stay-api/src/main/kotlin/com/stayloop/infrastructure/inventory/DailyRoomInventoryRepositoryImpl.kt` (`setLockMode(PESSIMISTIC_WRITE)` 만 사용)
+- `apps/stay-api/src/test/kotlin/com/stayloop/application/reservation/ConcurrentReservationTest.kt` (catch 분기 코멘트의 미래 NOWAIT 합류 흡수)
+- commit `2237cac`, `45b726c`
+
+---
+
+## A-Result-2. CouponSnapshot 컬럼 nullable 결함 — silent defect 회수
+
+### 배경
+- ② migration `31c2d27` (Reservation 모델에 할인 박제 컬럼 추가) 가 `CouponSnapshot` 의 4 컬럼을 `@Column(nullable=false)` 로 박음.
+- `ReservationModel.couponSnapshot: CouponSnapshot?` 자체는 nullable — 즉 *쿠폰 미적용* reservation 의 INSERT 시 4 컬럼이 모두 NULL 이어야 함.
+
+### 노출 시점
+- ③ Phase A-4 의 `ConcurrentReservationTest` 가 *쿠폰 미적용* reservation 을 처음으로 실 MySQL 에 INSERT.
+- 결과: `Column 'coupon_code' cannot be null` (NOT NULL constraint violation).
+- 단위 테스트 (InMemory 더블) 는 DDL 제약을 검증하지 않으므로 마스킹되어 ② 머지 후에도 미발견.
+
+### 실측 raw
+- SQL: `insert into reservations (...coupon_code, coupon_id, coupon_name, coupon_discount_type, ...) values (...?,?,?,?,...)`
+- Hibernate binding: `coupon_code = NULL`, `coupon_id = NULL`, `coupon_name = NULL`, `coupon_discount_type = NULL` (Hibernate 의 `@Embedded` null 처리: 모든 컬럼 NULL 변환)
+- DB 응답: `[Column 'coupon_code' cannot be null]; constraint [null]` (NOT NULL 제약)
+
+### 채택 결정 — 컬럼 단위 `nullable=true`
+- 4 컬럼 모두 `@Column(nullable=true)` 로 정렬 (commit `4159de6`).
+- 도메인 init 가드 (`couponId <= 0L` / `couponName.isBlank()` / `couponCode.isBlank()`) 는 그대로 — *embedded 가 존재할 때* 의 정합성만 책임.
+- Hibernate 의 *모든-컬럼-NULL ↔ embedded null 자동 변환* 표준 동작 의존.
+
+### 회귀 룰 박제 후보
+- verify-code §1 (Null 일관성) + §6 (입력 검증 / 불변식) 신규 룰 후보:
+  > *`@Embeddable` VO 가 nullable 로 사용된다면, 그 VO 의 `@Column` 들도 `nullable=true` 여야 한다. 도메인 init 가드는 *embedded 가 존재할 때만* 책임지고, 컬럼 NOT NULL 은 *항상 박제되는* embedded 에만 적용 (`PropertySnapshot` / `RoomTypeSnapshot` 패턴).*
+- 본 패턴이 미래 라운드에서 1회 이상 추가 발견되면 verify-code §-N 으로 정식 승격.
+
+### 마스킹 분석
+- 단위 테스트 영역 (`ReservationFacadeTest` 등) 은 `InMemory*Repository` 사용 — DDL 제약 미검증.
+- `@DataJpaTest` 슬라이스 테스트 또는 `@SpringBootTest` E2E 가 없으면 NOT NULL constraint violation 은 *production 진입 시* 노출. 본 Phase A 의 `ConcurrentReservationTest` 가 처음으로 *실 MySQL INSERT* 를 실행하면서 노출 — *Testcontainers 통합 테스트의 가치* 증명.
+
+### 영구 한계
+- 부분 NULL row (운영 데이터 정합 깨짐 — 마이그레이션 실수 / 어드민 직접 갱신) 시 Long primitive NPE 위험. 5주차+ 운영 정합 라운드에서 통합 테스트 추가 검토.
+- Hibernate 의 `embedded.null_handling` 옵션 명시 미적용 — default 동작 의존. major 업그레이드 시 회귀 위험.
+
+### 참조
+- commit `4159de6` (fix), commit `31c2d27` (원인)
+- `apps/stay-api/src/main/kotlin/com/stayloop/domain/reservation/value/CouponSnapshot.kt` (KDoc "embedded optional ↔ NOT NULL 사고" 메모)
+
+---
+
+## A-Result-3. plan 의 commit 단위 변형 — 같은 파일 같은 본질 변경의 단일 commit
+
+### 배경
+- plan ③ Phase A 가 4 commit 명시 (A-1 / A-2 / A-3 / A-4).
+- A-2 (reserve 락 호출 전환) + A-3 (cancel 락 호출 전환) 가 같은 파일 (`ReservationFacade.kt`) 의 *서로 다른 메서드* 변경.
+
+### 채택 결정 — A-2/A-3 단일 commit 합산
+- 사용자 결정 (2026-05-10): "4 commit 분리 (plan 정합)" 옵션 선택. 결과는 fix + A-1 + refactor (A-2/A-3 합산) + A-4 의 4 commit.
+- commit `3f73ef9` 메시지: `refactor : ReservationFacade 의 reserve / cancel 흐름이 정렬된 일자로 비관적 락 조회를 사용하도록 전환한다.` — reserve / cancel 둘 다 명시.
+
+### 정책 박제 후보
+- plan 의 commit 단위는 *의미 단위 (= 변경 의도)* 이지 *commit 갯수* 가 본질 X.
+- 같은 파일의 *같은 의도* 변경이 여러 메서드에 걸쳐 있으면 단일 commit 으로 합산 가능. 메시지 본문에 적용 범위 명시 (verify-code §19-B 문서 ↔ 가드 정합 정합).
+- 본 정책이 1회 더 적용되면 (Phase B / C / D 중 어느 곳) `CLAUDE.md` 의 "커밋" 섹션에 박제.
+
+---
+
+## Phase A 의 실제 commit 4건 (git-추적)
+
+| # | hash | prefix | 메시지 | 변경 단위 |
+|---|---|---|---|---|
+| 1 | `4159de6` | `fix` | `CouponSnapshot 의 박제 컬럼 4종 (couponId / couponName / couponCode / discountType) 을 nullable=true 로 정렬한다.` | `domain/reservation/value/CouponSnapshot.kt` (1 file, +8/-4) |
+| 2 | `2237cac` | `feat` | `DailyRoomInventoryRepository.findInventoriesForUpdate 비관적 락 (PESSIMISTIC_WRITE) 메서드를 추가한다.` | `domain/inventory/DailyRoomInventoryRepository.kt` + `infrastructure/inventory/DailyRoomInventoryRepositoryImpl.kt` + `support/test/InMemoryDailyRoomInventoryRepository.kt` + `support/test/InMemoryDailyRoomInventoryRepositoryTest.kt` (4 files, +125/-2) |
+| 3 | `3f73ef9` | `refactor` | `ReservationFacade 의 reserve / cancel 흐름이 정렬된 일자로 비관적 락 조회를 사용하도록 전환한다.` | `application/reservation/ReservationFacade.kt` (1 file, +12/-4) |
+| 4 | `45b726c` | `feat` | `DailyRoomInventory 동시 차감 E2E 테스트 (10 스레드 × 마지막 1실) 를 추가한다.` | `application/reservation/ConcurrentReservationTest.kt` (1 file, +222) |
+
+**Plan 변형 1건**: A-2/A-3 합산 (4 commit 갯수 유지).
+
+## 검증 게이트 결과 (2026-05-10)
+
+| 게이트 | 결과 | 발견 / 메모 |
+|---|---|---|
+| `verify-code` | ✅ PASS | P0 0건 / P1 1건 (테스트 코멘트 NOWAIT 거짓말 — 즉시 fix) / P2 4건 (보류 사유 박제: NOWAIT 합류 / 매직 상수 / 부분 NULL hydration / 공통 베이스 클래스 추출) |
+| `verify-architecture` | ✅ PASS | 위반 0건 — 의존 방향 / Aggregate 구조 / 어노테이션 누출 / 횡단 규칙 / 멀티모듈 경계 모두 정상 |
+| `verify-tests` | ✅ PASS | 396 tests / 0 failures, ktlintCheck PASS. 신규 5건 (ConcurrentReservationTest 1 + InMemory 단위 4) |
+
+## week4-quests Checklist 매핑 (Phase A 시점)
+
+- [x] **Inventory 동시성 ③** (동일 객실 / 동일 일자 동시 예약 시 더블부킹 X) — `ConcurrentReservationTest` PASS
+- [ ] **다일자 겹침 동시성 ④** — Phase D-1 으로 이연 (다일자 락 순서 검증 위해 추가 시나리오 필요)
+- [ ] **Coupon 동시성 ②** (동일 쿠폰 다중 기기 동시 사용) — Phase B 진입 대기
+- [ ] **Wishlist 동시성 ①** (동일 숙소 찜/찜취소 정합성) — Phase C 진입 대기
+
+## 미해결 위험 박제
+
+1. **모바일 30s timeout < `innodb_lock_wait_timeout` 50s** 의 다층 정합 깨짐 — 5주차+ NOWAIT 합류 시점에 해소.
+2. **CouponSnapshot 부분 NULL row** 의 Long primitive NPE — 운영 정합 라운드 (5주차+) 통합 테스트.
+3. **`@SpringBootTest` 격리** — 본 ConcurrentReservationTest 는 `DatabaseCleanUp.truncateAllTables()` (BeforeEach + AfterEach) 로 격리. Phase B / C / D 의 추가 동시성 테스트가 합류하면 *공통 베이스 클래스* (`AbstractConcurrencyE2ETest`) 추출 검토 (n=2 시점).
