@@ -1,16 +1,25 @@
 package com.stayloop.application.reservation
 
 import com.stayloop.application.reservation.command.ReserveCommand
+import com.stayloop.domain.coupon.CouponIssueModel
+import com.stayloop.domain.coupon.CouponIssueRepository
+import com.stayloop.domain.coupon.CouponIssueService
+import com.stayloop.domain.coupon.CouponTemplateRepository
+import com.stayloop.domain.common.value.Money
+import com.stayloop.domain.coupon.value.Discount
 import com.stayloop.domain.inventory.DailyRoomInventoryRepository
 import com.stayloop.domain.property.PropertyRepository
 import com.stayloop.domain.property.RoomTypeRepository
+import com.stayloop.domain.rate.DailyRoomRateModel
 import com.stayloop.domain.rate.DailyRoomRateRepository
 import com.stayloop.domain.reservation.ReservationModel
 import com.stayloop.domain.reservation.ReservationRepository
 import com.stayloop.domain.reservation.ReservationService
+import com.stayloop.domain.reservation.value.CouponSnapshot
 import com.stayloop.domain.reservation.value.PropertySnapshot
 import com.stayloop.domain.reservation.value.RoomTypeSnapshot
 import com.stayloop.domain.reservation.value.StayPeriod
+import com.stayloop.domain.user.UserRepository
 import com.stayloop.domain.user.value.LoginId
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
@@ -46,10 +55,33 @@ class ReservationFacade(
     private val propertyRepository: PropertyRepository,
     private val roomTypeRepository: RoomTypeRepository,
     private val reservationService: ReservationService,
+    private val couponIssueRepository: CouponIssueRepository,
+    private val couponTemplateRepository: CouponTemplateRepository,
+    private val couponIssueService: CouponIssueService,
+    private val userRepository: UserRepository,
     private val clock: Clock,
 ) {
     /**
-     * 예약 생성 — 시퀀스 2 흐름. (AC-3, AC-4, AC-5)
+     * 예약 생성 — 시퀀스 2 흐름. (AC-3, AC-4, AC-5, ② 합류 — 쿠폰 적용)
+     *
+     * **쿠폰 적용 흐름** (`docs/plan/week4.md` ② Commit 4, `docs/plan/week4/decision.md` D-3 / D-9):
+     * 1. `command.couponId == null` → 쿠폰 미적용. 기존 흐름 그대로.
+     * 2. `command.couponId != null` →
+     *    a. `couponIssueRepository.findById` (없으면 NOT_FOUND)
+     *    b. **본인 자원 인가** — `issue.userId == users.findByLoginId(actor).id` 비교
+     *       (식별자 노출 금지 — 메시지에 couponId / userId 박지 X, verify-code §12)
+     *    c. `couponTemplateRepository.findById(issue.templateId)` (없으면 INTERNAL_ERROR — 데이터 정합 깨짐)
+     *    d. *priceBeforeDiscount* = `rates` 합산 (Service 와 동일 합산을 한 번 더 — calculator 가 검증)
+     *    e. `couponIssueService.apply(issue, template, priceBefore, now): Discount`
+     *    f. `CouponSnapshot` 박제 조립 (id / name / code / type)
+     * 3. `ReservationService.reserve(..., discount, couponSnapshot)` — 재고 차감 + 합산 + 박제 정합 검증
+     * 4. `reservationRepository.save(reservation)` — IDENTITY id 부여
+     * 5. **id 부여 후** `issue.use(actor.id, reservation.id, now)` + `couponIssueRepository.save(issue)`
+     *    (CouponIssueService KDoc 의 *순수 계산 / 상태 변경 분리* 정합 — `decision.md` D-9)
+     *
+     * **부분 실패 롤백** — 단일 `@Transactional` 안에서 진행되므로 (a) 재고 차감 도중 throw, (b) 쿠폰 사용
+     * 도중 throw, (c) 어떤 검증 실패라도 *전체 롤백* (week4-quests Implementation Quest "쿠폰, 일자별 재고,
+     * 결제 금액 처리 등 하나라도 작업이 실패하면 모두 롤백" 정합).
      */
     @Transactional
     fun reserve(command: ReserveCommand): ReservationInfo {
@@ -80,6 +112,9 @@ class ReservationFacade(
             maxGuests = roomType.guestCount.max,
         )
 
+        val now = LocalDateTime.now(clock)
+        val coupon = command.couponId?.let { resolveAndApplyCoupon(command.userId, it, rates, now) }
+
         val (updatedInventories, reservation) = reservationService.reserve(
             userId = command.userId,
             propertySnapshot = propertySnapshot,
@@ -89,11 +124,74 @@ class ReservationFacade(
             guest = command.guest,
             inventories = inventories,
             rates = rates,
+            discount = coupon?.discount,
+            couponSnapshot = coupon?.snapshot,
         )
 
         inventoryRepository.saveAll(updatedInventories)
-        return ReservationInfo.from(reservationRepository.save(reservation))
+        val saved = reservationRepository.save(reservation)
+
+        // 예약 저장으로 reservation.id 가 부여된 *후* 쿠폰 사용 처리 (CouponIssueService KDoc 의 시간 분리).
+        if (coupon != null) {
+            coupon.issue.use(actor = coupon.actorId, reservationId = saved.id, now = now)
+            couponIssueRepository.save(coupon.issue)
+        }
+
+        return ReservationInfo.from(saved)
     }
+
+    /**
+     * 쿠폰 검증 + Discount 계산 + CouponSnapshot 박제 조립. **issue 의 사용 처리(`use`) 는 호출자가 별도 호출** —
+     * `reservation.id` 가 부여된 *후* 호출되어야 하므로 본 메서드는 *사용 처리 직전 상태* 까지만 준비.
+     *
+     * 본인 자원 인가 시 메시지 일반화 — 식별자(couponId / userId) 노출 금지 (verify-code §12).
+     */
+    private fun resolveAndApplyCoupon(
+        actor: LoginId,
+        couponId: Long,
+        rates: List<DailyRoomRateModel>,
+        now: LocalDateTime,
+    ): AppliedCoupon {
+        val issue = couponIssueRepository.findById(couponId)
+            ?: throw CoreException(ErrorType.NOT_FOUND, "사용할 수 없는 쿠폰입니다.")
+        val user = userRepository.findByLoginId(actor)
+            ?: throw CoreException(ErrorType.UNAUTHORIZED, "인증된 사용자 정보를 찾을 수 없습니다.")
+        if (issue.userId != user.id) {
+            // 식별자 노출 금지 — 본인 자원이 아님을 일반화된 메시지로 거절
+            throw CoreException(ErrorType.BAD_REQUEST, "사용할 수 없는 쿠폰입니다.")
+        }
+        val template = couponTemplateRepository.findById(issue.templateId)
+            ?: throw CoreException(
+                ErrorType.INTERNAL_ERROR,
+                "쿠폰 템플릿이 누락되어 사용할 수 없습니다.",
+            )
+
+        val priceBefore = rates.fold(Money.ZERO) { acc, rate -> acc + rate.pricePerNight }
+        val discount: Discount = couponIssueService.apply(issue, template, priceBefore, now)
+        val snapshot = CouponSnapshot(
+            couponId = issue.id,
+            couponName = template.name.value,
+            couponCode = template.code,
+            discountType = template.discountValue.type,
+        )
+        return AppliedCoupon(
+            issue = issue,
+            actorId = user.id,
+            discount = discount,
+            snapshot = snapshot,
+        )
+    }
+
+    /**
+     * 쿠폰 적용을 위한 *정합 묶음* — issue / actorId / discount / snapshot 의 4 인자가 흩어지지 않게
+     * Facade 내부에서만 쓰는 Sealed VO. 외부 노출 X.
+     */
+    private data class AppliedCoupon(
+        val issue: CouponIssueModel,
+        val actorId: Long,
+        val discount: Discount,
+        val snapshot: CouponSnapshot,
+    )
 
     /**
      * 예약 취소 — 시퀀스 3 흐름. (AC-7)
