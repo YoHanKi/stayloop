@@ -97,7 +97,12 @@ class ReservationFacade(
         }
 
         val period = command.period
-        val inventories = inventoryRepository.findAllInRange(roomType.id, period.checkIn, period.checkOut)
+        // 다일자 락 순서 = `date ASC` — Repository SQL (`orderBy(d.date.asc())`) + Facade 진입점 양쪽에 명시한다
+        // (`docs/plan/week4.md` ③ Phase A, decision.md D-1, verify-code §19-B 문서 ↔ 가드 정합).
+        // `period.datesToReserve()` 는 이미 [checkIn, checkOut) 오름차순이지만, 호출자 의도를 *명시적으로*
+        // 박아 누락된 호출자가 등장해도 정렬 의무가 가시화되도록 `.sorted()` 를 한 번 더 통과시킨다.
+        val sortedDates = period.datesToReserve().sorted()
+        val inventories = inventoryRepository.findInventoriesForUpdate(roomType.id, sortedDates)
         val rates = rateRepository.findAllInRange(roomType.id, period.checkIn, period.checkOut)
 
         val propertySnapshot = PropertySnapshot(
@@ -203,10 +208,13 @@ class ReservationFacade(
         requireOwner(reservation, loginId, "취소")
 
         val period = reservation.period
-        val inventories = inventoryRepository.findAllInRange(
+        // cancel 흐름의 inventory 복원도 비관적 락으로 잡는다 — 동시에 진행 중인 reserve 가 같은 row 를 차감
+        // 하는 race 를 차단 (단순 `findAllInRange` 사용 시 release 직전 reserve 가 끼어들어 음수 진입 시도 또는
+        // CONFLICT 가 잘못된 위치에서 발동될 위험). `date ASC` 정렬은 reserve 와 동일 순서 — 데드락 회피.
+        val sortedDates = period.datesToReserve().sorted()
+        val inventories = inventoryRepository.findInventoriesForUpdate(
             reservation.roomTypeId,
-            period.checkIn,
-            period.checkOut,
+            sortedDates,
         )
 
         val (updatedInventories, cancelled) = reservationService.cancel(
