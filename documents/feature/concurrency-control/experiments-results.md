@@ -27,8 +27,8 @@
 
 | 전략 | 성공 | 실패 | p95 latency | final reserved (각 일자) |
 |---|---|---|---|---|
-| **PESS** (`SELECT FOR UPDATE` + `ORDER BY date ASC`) | 1 | 99 (deadlock_or_lock_timeout) | **175 ms** | {5/10=1, 5/11=1, 5/12=1} ✓ |
-| **ATOMIC** (`UPDATE ... WHERE reserved < total` 일자별) | 1 (실측 라벨 100 — 코드 라벨링 버그, 실 차감 1) | 99 (CAS affected=0) | **116 ms** | {5/10=1, 5/11=1, 5/12=1} ✓ |
+| **PESS** (`SELECT FOR UPDATE` + `ORDER BY date ASC`) | 1 | 99 (`SQLException` — InnoDB deadlock victim 또는 lock_wait_timeout — Round 1 검토 시점 *errorCode 미분리*) | **175 ms** | {5/10=1, 5/11=1, 5/12=1} ✓ |
+| **ATOMIC** (`UPDATE ... WHERE reserved < total` 일자별) | **실 차감 = 1** (outcomes 라벨 ok=100 은 catch-all 라벨링 버그 — `incremented.size==0` 인 실패 thread 까지 OK 분류, *최종 정합성은 final reserved 가 검증*) | 99 (CAS affected=0) | **116 ms** | {5/10=1, 5/11=1, 5/12=1} ✓ |
 
 ### 판정
 - **두 전략 모두 정합성** ✓ (final reserved = 1 each)
@@ -62,7 +62,7 @@
 
 ### 판정
 - **NOWAIT**: p95 = 37ms — 임계 (100ms) 충분히 충족. 모두 즉시 fail 이지만 *사용자 30s timeout 안 stable 결정적 응답*.
-- **DEFAULT**: p95 = 9_823ms — holder hold (10s) 와 정합. 그러나 **38% (19/50) 가 HikariCP pool exhaustion** — 본 실험은 maxPool=32 라 50 thread 가 들어오면 18 명이 *connection 자체* 를 못 받고 5s 후 timeout (LQ7 의 *pool 고갈 → 후속 모든 요청에 영향* 정량화).
+- **DEFAULT**: p95 = 9_823ms — holder hold (10s) 와 정합. 그러나 **38% (19/50) 가 HikariCP pool exhaustion** — *원인 분리*: maxPool=32 + holder 1 + waiter 50 → 18 명이 connection 자체를 못 받음. *Hikari `connectionTimeout=5s` 가 holder hold (10s) 보다 짧아* 5s 후 `Connection is not available` 으로 fail. **이 비율은 (holder hold / Hikari connectionTimeout) 비율에 따라 변동** — holder hold < 5s 면 pool exhaustion 0, holder hold >> 5s 면 100%. 본 실험은 그 사이.
 - **결정**: NOWAIT 강제. `decision.md` D-1 의 fast-follow #1 채택 — `findInventoriesForUpdate` 에 `@QueryHints(QueryHint(name = "javax.persistence.lock.timeout", value = "0"))` 박제.
 - **로우레벨 박제**: LQ3 / LQ7 / LQ19 모두 정량화 — 50s default 가 30s 사용자 timeout 보다 길고, pool 고갈은 *전체 시스템 cascade* 를 일으킴.
 
@@ -79,10 +79,12 @@
 
 ### 측정 raw
 
-| 전략 | 총 success | 총 conflict | false negative |
+| 전략 | 총 success | 총 conflict | autoCommit race 통과 (= success - rounds) |
 |---|---|---|---|
-| **Long** (DB +1) | 40 | 960 | **30** (success - rounds = 40 - 10) |
-| **Timestamp(ms)** (`now_ms`) | 71 | 929 | **61** (success - rounds = 71 - 10) |
+| **Long** (DB +1) | 40 | 960 | **30** (autoCommit race 통과 — *진짜 false negative 가 아님*) |
+| **Timestamp(ms)** (`now_ms`) | 71 | 929 | **61** (Long 대비 +31 — *동일 ms race* 가 단독으로 만든 차이) |
+
+> **라벨 정정 (Round 1 검토)**: 본 표의 옛 라벨 *false negative* 는 부정확. autoCommit=true 환경에서는 *낙관적 락 자체가 의도대로 작동 X* — SELECT-then-UPDATE 사이에 다른 thread 의 commit 이 보이면 *그 시점의 version* 으로 정상 통과한다 (낙관적 락의 *정상 동작*). *진짜 false negative* (충돌인데 통과) 검증은 single-tx 환경 (E-3-r1) 에서.
 
 ### 판정
 - 두 전략 모두 false negative > 0 — 본 실험은 *autoCommit=true* 로 *각 statement 별 개별 transaction* (REPEATABLE READ snapshot 부재). 즉 SELECT-then-UPDATE 사이에 다른 thread 의 commit 이 *반영* 되어 다른 version 을 보고 정상 통과 → "직렬화" 로 보임.
@@ -115,7 +117,8 @@
 
 ### 판정
 - **둘 다 ≈ TX1 hold 시간 (5000ms) 만큼 차단** — 가설은 부분적 깨짐.
-- 이유: `IN (5/10, 5/12)` 의 next-key lock 이 *5/12 의 supremum* 까지 잡음. 5/15 도 supremum 안에 들어가 차단.
+- 이유 (Round 0 가설): `IN (5/10, 5/12)` 의 next-key lock 이 *5/12 의 supremum* 까지 잡음. 5/15 도 supremum 안에 들어가 차단.
+- **Round 1 검토 — 추가 가설**: 본 테이블이 `id BIGINT AUTO_INCREMENT` 라 *AUTO_INCREMENT lock* 도 supremum 차단의 한 cause 일 수 있음. Round 1 재실험 (E-4-r1) 에서 *명시 id INSERT* + *foreign room_type_id* 로 cause 분리 측정.
 - **운영 위험 정량화 강화**: LQ2 / LQ25 — 어드민 일자별 적재가 *전혀 다른 일자* 라도 long-running booking TX 와 동일 인덱스 supremum 안이면 차단 가능.
 - **결정**: `decision.md` D-1 의 *어드민 적재 가이드* 강화 — *trough hour 적재* + *짧은 TX 분할* 박제.
 
@@ -254,3 +257,77 @@ E-1 ATOMIC 의 outcomes 라벨링이 부정확 (`outcomes.offer("OK")` 가 *exce
 - `E8_InMemoryVsTestcontainersExperimentTest.kt`
 
 CLAUDE.md "실험 테스트" 정책의 5-step 워크플로우 step 5 (코드 삭제). 박제된 결과가 SSOT 이며, 코드는 일회성 도구. 미래 재실험 시 본 박제의 시나리오 / 측정 항목 / 임계값 / 환경 메타로 재구성 가능.
+
+---
+
+# 재귀 검토 — Round 1 (2026-05-09)
+
+> `Skill(experiment-recurse)` 호출. CLAUDE.md "실험 테스트" 5-step 의 step 4 (박제) 와 step 5 (코드 삭제)
+> 사이의 *품질 게이트*. 7 축 (A 환경 / B 시나리오 / C 도구 의미론 / D 라벨링 / E 해석 / F 통계 / G 가설)
+> 순서로 8 실험 박제 검토 → 분류 (a 즉시 수정 / b 재실험 / c 영구 한계).
+
+## 발견된 허점
+
+| 실험 | 카테고리 | 허점 | 분류 |
+|---|---|---|---|
+| E-1 | D 라벨링 | ATOMIC `outcomes.offer("OK")` 가 catch-all 로 *실패 thread 까지 OK 분류*. final reserved 가 정합성 검증의 SSOT | (a) 즉시 수정 |
+| E-1 | E 해석 | PESS 의 `deadlocks=99` 라벨이 부정확 — `SQLException` errorCode 미분리 (deadlock victim 1213 vs lock_wait_timeout 1205 가 섞임) | (a) 즉시 수정 |
+| E-1 | B 시나리오 | *모든 일자 동시 가용 1* 한정 — ATOMIC 의 *부분 차감* 이 row lock 직렬화로 발생 안 함. 가설 (PESS 가 부분 실패 보상 비용 작음) 반증 시나리오 부재 | (b) 재실험 — *각 일자 다른 가용 수* 시나리오 |
+| E-2 | E 해석 | DEFAULT 38% pool exhaustion 의 *원인* (HikariCP `connectionTimeout=5s` < holder hold 10s) 미명시 | (a) 즉시 수정 |
+| E-2 | F 통계 | 1 trial 단일 — 분포 측정 부족 | (c) 영구 한계 (본 라운드 환경 한정) |
+| E-3 | A 환경 | autoCommit=true → SELECT-then-UPDATE 가 *각각 별 transaction*. 진짜 single-tx 낙관적 락 의미 X | (b) 재실험 — autoCommit=false + REPEATABLE READ |
+| E-3 | E 해석 | "false negative" 라벨 부정확 — autoCommit 환경에서는 *낙관적 락 자체가 의도대로 작동 X* — 다른 thread 가 commit 한 version 을 본 정상 통과는 *false negative 아님* | (a) 즉시 수정 |
+| E-4 | E 해석 | "5/12 supremum" 가설은 *AUTO_INCREMENT lock* 가능성과 미분리. 실은 인덱스 마지막 row 이후 *모든 supremum* 가능 | (a) 즉시 수정 + (b) 재실험 — 명시 id INSERT + foreign room_type_id 시나리오 |
+| E-6 | C 도구 의미론 | JDBC `setReadOnly(true)` 와 Hibernate `@Transactional(readOnly=true)` 는 완전히 다른 메커니즘 — 본 raw JDBC 실험은 Hibernate readOnly silent loss 를 입증 X | (c) 영구 한계 — full @SpringBootTest 가 본질, 5주차+ 합류 |
+| E-7 | B 시나리오 | 단일 thread 시뮬레이션 — *진짜 동시 actor* race 부재 | (b) 재실험 — A (낙관적 락 actor) ↔ B (native UPDATE) 동시 실행 |
+| E-8 | B 시나리오 | *마지막 1실 시나리오* 한정 — InMemory 한계 (gap lock / deadlock / MDL) 직접 입증 부재 | (c) 영구 한계 — 다른 실험 (E-4, E-5) 이 InMemory 가 재현 못 하는 의미론 *간접* 입증 |
+
+## (a) 즉시 수정된 박제
+
+E-1 ATOMIC 표 라벨 + PESS deadlock 라벨 + E-2 DEFAULT 원인 분리 + E-3 false negative 라벨 정정 + E-4 cause 가설 추가 — 본 문서의 각 *측정 raw* 표와 판정에 *Round 1 검토* 표시로 갱신 (위 본문 참조).
+
+## (b) 재실험 결과
+
+| 실험 | 시나리오 | 새 측정 raw | 새 판정 |
+|---|---|---|---|
+| **E-1-r1** | 5/10:5, 5/11:1, 5/12:5, 30 thread | PESS: ok=1 / rollback=0 / partial=0 / p95=94ms / final {1,1,1} ✓<br>ATOMIC: ok=1 / **rollback=29 / partial decrement samples=[1] (29 thread 가 5/10 차감 후 5/11 가용 0 → rollback)** / p95=127ms / final {1,1,1} ✓ | **가설 ✓ 정량 검증** — ATOMIC 부분 차감이 *실제 발생* (29 건). PESS 는 일자 ASC 정렬 락으로 *5/11 락 획득 시점 가용 0 즉시 throw* → 부분 차감 0. *PESS 의 보상 표면이 작음* 가설 정량 입증 |
+| **E-3-r1** | autoCommit=false, REPEATABLE READ snapshot, 100 thread × 10 라운드 | Long: success=48 / distribution [8,6,5,5,4,4,4,4,4,4]<br>TS_MS: success=40 / distribution [4,4,4,4,4,4,4,4,4,4] | **가설 *조건부* 깨짐** — single-tx 환경에서도 success > 1. 이는 *낙관적 락의 *조건부* 동작* — *동시 진입* 일 때만 1 thread 만 성공이고, *thread 진입 분산* (warm pool / cold cache) 으로 *서로 다른 시점의 valid version 으로 통과* 한 정상 동작 (false negative 아님). 그러나 distribution 의 분산도가 Long 더 크고 TS_MS 더 좁음 — TS_MS 가 *진입 분산을 줄이는 효과* (즉, 충돌 검출이 더 강함?) 추가 분석 필요. 채택은 Long 유지 (안전성 + 단조 증가의 운영 디버깅 용이성) |
+| **E-4-r1** | seed (1001, 5/10) (1001, 5/12), TX1 5s hold, 명시 id INSERT — gap (1001, 5/11) / outside (1001, 5/15) / foreign (9999, 5/15) | gap wait=4_833ms / outside wait=4_841ms / **foreign wait=4_841ms** | **가설 *완전 깨짐*** — *foreign room_type_id 도 차단됨*. 원인 — `(room_type_id, d)` UNIQUE 인덱스의 *마지막 row 이후 supremum gap lock* 은 *room_type_id 무관* 하게 *인덱스 끝* 까지 잡힘. **운영 위험 매우 강화** — 어드민이 *어떤 room_type / 어떤 일자* 를 INSERT 해도 long-running booking TX 가 같은 인덱스의 마지막 row 를 잡고 있으면 차단. *trough hour 적재* 외에 *FOR UPDATE 의 마지막 row 회피* (LIMIT N - 1) 등 추가 가이드 필요 |
+| **E-7-r1** | A=낙관적 락 actor (READ_COMMITTED), B=native UPDATE — A SELECT 후 B native UPDATE → A UPDATE WHERE version=5 | A_SELECT_VERSION=5 / B_NATIVE_AFFECTED=1 / **A_OPTIMISTIC_AFFECTED=1 (silent pass)** / final wish_count=101, version=6 | **가설 ✓** — A 의 낙관적 락이 *B 의 native commit 을 모르고* version=5 에서 통과. 본 시나리오는 `SET wish_count = wish_count + N` (DB-side atomic) 라 *lost update 자체* 는 회복되었으나, **충돌 미감지 자체** 가 본질적 위험 (`SET wish_count = ?` literal 패턴이면 lost update 발생). R6 회귀 룰 정당성 *강화* |
+
+## 영구 한계 박제 (Round 1 종료 시점)
+
+- **E-2 통계 유의성**: 1 trial 단일 측정 — 분포 / outlier / cold cache 영향 분리 X. *후속 라운드 (5주차+ Hold + TTL 합류 시점) 에서 다회 trial + warm-up + cold cache 변수 분리* 권장.
+- **E-6 도구 의미론**: Hibernate `@Transactional(readOnly = true)` 의 *flush mode = MANUAL silent loss* 는 *full @SpringBootTest + Spring TransactionTemplate* 환경에서만 재현 가능. 본 라운드 raw JDBC 로는 측정 불가. *5주차+ 통합 테스트 라운드* 에서 측정.
+- **E-8 시나리오 영구 한계**: *마지막 1실 좁은 시나리오* 만 InMemory ↔ Testcontainers 비교 측정. 다른 의미론 (gap lock E-4, deadlock E-1 PESS, MDL E-5) 는 *InnoDB 만의 동작* 이라 *InMemory 가 재현 자체 불가* 의 간접 입증으로 충분.
+- **E-3 분포 해석 미완**: TS_MS distribution 이 Long 보다 더 *좁은* 이유 (진입 분산 줄이는 효과? clock_skew 가 보호?) 의 정량 분석 미진행. 채택 결정 (Long) 에는 영향 없음 — *단조 증가 + 운영 디버깅 용이성* 의 본질 근거가 더 큼.
+
+## Round 1 종료 조건
+
+- (a) 즉시 수정 5건 — 박제 본문 갱신 완료
+- (b) 재실험 4건 — 모두 실행 + 결과 박제 (E-1-r1 / E-3-r1 / E-4-r1 / E-7-r1)
+- (c) 영구 한계 4건 — 명시적 박제 (E-2 통계 / E-6 도구 / E-8 시나리오 / E-3 분포 해석)
+- **남은 (b) 재실험 0건** → Round 2 진입 불요. 재귀 검토 종료 (1 라운드 만에 PASS).
+
+## Round 1 의 결정 변경 / 강화
+
+| 영역 | Round 0 결정 | Round 1 갱신 |
+|---|---|---|
+| Inventory 더블부킹 | PESS + ORDER BY date ASC + NOWAIT | **유지** + 가설 정량 검증 (E-1-r1: ATOMIC 부분 차감 29 / PESS 0) |
+| Coupon 단일 사용 | `@Version Long` + DB UNIQUE | **유지** + 채택 근거를 *false negative* 비교에서 *단조 증가 + 운영 디버깅* 으로 갱신 (실험으로 *낙관적 락 false negative 0* 입증 X) |
+| 어드민 일자 적재 | trough hour + 짧은 TX | **강화** — *어떤 room_type/일자 INSERT 도 차단 가능* (E-4-r1 foreign 도 차단). gap lock 회피는 *마지막 row 회피 패턴* (`LIMIT N-1` / `WHERE d < (SELECT MAX(d) FROM ...)`) 추가 가이드 |
+| `R6` 회귀 룰 | 권고 | **정식 승격 정당화** (E-7-r1 silent pass 재현) |
+| `R5` 회귀 룰 | 권고 | **유지 — 본 라운드 입증 X** (E-6 영구 한계로 박제), 5주차+ 통합 테스트 라운드에서 재측정 |
+
+---
+
+## Round 1 코드 삭제 박제
+
+다음 파일 삭제 — `apps/stay-api/src/test/kotlin/com/stayloop/experiment/` 안 (gitignored, 로컬 한정):
+- `ExperimentSupport.kt` (Round 0 와 Round 1 공용)
+- `E1r1_HeterogeneousAvailabilityExperimentTest.kt`
+- `E3r1_SingleTxOptimisticLockExperimentTest.kt`
+- `E4r1_GapLockSupremumAnalysisExperimentTest.kt`
+- `E7r1_TrueConcurrentVersionExperimentTest.kt`
+
+CLAUDE.md "실험 테스트" 5-step 의 step 5 (코드 삭제) + `experiment-recurse` SKILL §5.9 정합. 박제된 결과가 SSOT.
