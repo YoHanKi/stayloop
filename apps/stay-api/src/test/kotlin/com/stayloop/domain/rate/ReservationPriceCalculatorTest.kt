@@ -1,6 +1,7 @@
 package com.stayloop.domain.rate
 
 import com.stayloop.domain.common.value.Money
+import com.stayloop.domain.coupon.value.Discount
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
 import org.assertj.core.api.Assertions.assertThat
@@ -71,6 +72,56 @@ class ReservationPriceCalculatorTest {
         val total = calculator.totalPrice(rates)
 
         assertThat(total).isEqualTo(Money.of(100_000L))
+    }
+
+    @DisplayName("discount = null 이면 합산 결과 그대로 반환 — 기존 호출 흐름 회귀.")
+    @Test
+    fun shouldKeepLegacyBehaviorWhenDiscountIsNull() {
+        val rates = listOf(
+            rateOf(date = LocalDate.of(2026, 5, 10), price = 100_000L),
+            rateOf(date = LocalDate.of(2026, 5, 11), price = 110_000L),
+        )
+
+        val total = calculator.totalPrice(rates, discount = null)
+
+        assertThat(total).isEqualTo(Money.of(210_000L))
+    }
+
+    @DisplayName("discount 가 주어지면 finalPrice 를 반환한다.")
+    @Test
+    fun shouldReturnFinalPrice_whenDiscountProvided() {
+        val rates = listOf(
+            rateOf(date = LocalDate.of(2026, 5, 10), price = 100_000L),
+            rateOf(date = LocalDate.of(2026, 5, 11), price = 100_000L),
+        )
+        val discount = Discount(
+            beforeDiscount = Money.of(200_000L),
+            amount = Money.of(20_000L),
+            finalPrice = Money.of(180_000L),
+        )
+
+        val total = calculator.totalPrice(rates, discount)
+
+        assertThat(total).isEqualTo(Money.of(180_000L))
+    }
+
+    @DisplayName("discount.beforeDiscount 가 합산 결과와 일치하지 않으면 BAD_REQUEST — 외부 조립 거부.")
+    @Test
+    fun shouldReject_whenDiscountBeforeMismatchSum() {
+        val rates = listOf(
+            rateOf(date = LocalDate.of(2026, 5, 10), price = 100_000L),
+            rateOf(date = LocalDate.of(2026, 5, 11), price = 100_000L),
+        )
+        // 합산은 200_000 인데 discount 가 다른 기준 (250_000) 으로 만들어진 경우
+        val mismatched = Discount(
+            beforeDiscount = Money.of(250_000L),
+            amount = Money.of(25_000L),
+            finalPrice = Money.of(225_000L),
+        )
+
+        assertThatThrownBy { calculator.totalPrice(rates, mismatched) }
+            .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
     }
 
     private fun rateOf(date: LocalDate, price: Long): DailyRoomRateModel =
