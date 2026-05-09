@@ -1,9 +1,12 @@
 package com.stayloop.domain.reservation
 
 import com.stayloop.domain.common.value.Money
+import com.stayloop.domain.coupon.value.Discount
+import com.stayloop.domain.coupon.value.DiscountType
 import com.stayloop.domain.inventory.DailyRoomInventoryModel
 import com.stayloop.domain.rate.DailyRoomRateModel
 import com.stayloop.domain.rate.ReservationPriceCalculator
+import com.stayloop.domain.reservation.value.CouponSnapshot
 import com.stayloop.domain.reservation.value.GuestInfo
 import com.stayloop.domain.reservation.value.PropertySnapshot
 import com.stayloop.domain.reservation.value.ReservationStatus
@@ -424,6 +427,82 @@ class ReservationServiceTest {
             service.cancel(reservation, inventories, LocalDateTime.of(2026, 5, 11, 10, 0))
         }.isInstanceOf(CoreException::class.java)
             .extracting("errorType").isEqualTo(ErrorType.CONFLICT)
+    }
+
+    @DisplayName("쿠폰 적용 — discount.finalPrice 가 reservation.totalPrice 와 일치, 박제 컬럼이 채워진다.")
+    @Test
+    fun shouldReserveWithDiscount() {
+        val inventories = listOf(
+            inventoryAt(LocalDate.of(2026, 5, 10), totalRooms = 5),
+            inventoryAt(LocalDate.of(2026, 5, 11), totalRooms = 5),
+        )
+        val rates = listOf(
+            rateAt(LocalDate.of(2026, 5, 10), price = 100_000L),
+            rateAt(LocalDate.of(2026, 5, 11), price = 100_000L),
+        )
+        val discount = Discount(
+            beforeDiscount = Money.of(200_000L),
+            amount = Money.of(20_000L),
+            finalPrice = Money.of(180_000L),
+        )
+        val snapshot = CouponSnapshot(
+            couponId = 42L,
+            couponName = "여름 10% 할인",
+            couponCode = "SUMMER10",
+            discountType = DiscountType.RATE,
+        )
+
+        val (_, reservation) = service.reserve(
+            userId = anyUser,
+            propertySnapshot = standardSnapshotProperty,
+            roomTypeSnapshot = standardSnapshotRoomType,
+            period = standardPeriod,
+            guestCount = 2,
+            guest = anyGuest,
+            inventories = inventories,
+            rates = rates,
+            discount = discount,
+            couponSnapshot = snapshot,
+        )
+
+        assertThat(reservation.priceBeforeDiscount).isEqualTo(Money.of(200_000L))
+        assertThat(reservation.discountAmount).isEqualTo(Money.of(20_000L))
+        assertThat(reservation.totalPrice).isEqualTo(Money.of(180_000L))
+        assertThat(reservation.couponId).isEqualTo(42L)
+    }
+
+    @DisplayName("불일치 — discount 만 주어지고 couponSnapshot 이 비면 BAD_REQUEST.")
+    @Test
+    fun shouldReject_whenDiscountWithoutCouponSnapshot() {
+        val inventories = listOf(
+            inventoryAt(LocalDate.of(2026, 5, 10), totalRooms = 5),
+            inventoryAt(LocalDate.of(2026, 5, 11), totalRooms = 5),
+        )
+        val rates = listOf(
+            rateAt(LocalDate.of(2026, 5, 10), price = 100_000L),
+            rateAt(LocalDate.of(2026, 5, 11), price = 100_000L),
+        )
+        val discount = Discount(
+            beforeDiscount = Money.of(200_000L),
+            amount = Money.of(20_000L),
+            finalPrice = Money.of(180_000L),
+        )
+
+        assertThatThrownBy {
+            service.reserve(
+                userId = anyUser,
+                propertySnapshot = standardSnapshotProperty,
+                roomTypeSnapshot = standardSnapshotRoomType,
+                period = standardPeriod,
+                guestCount = 2,
+                guest = anyGuest,
+                inventories = inventories,
+                rates = rates,
+                discount = discount,
+                couponSnapshot = null,
+            )
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
     }
 
     private fun inventoryAt(date: LocalDate, totalRooms: Int, reservedRooms: Int = 0): DailyRoomInventoryModel =
