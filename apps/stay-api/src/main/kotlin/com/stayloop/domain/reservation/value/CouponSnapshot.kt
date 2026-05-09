@@ -29,14 +29,18 @@ import jakarta.persistence.Enumerated
  */
 @Embeddable
 data class CouponSnapshot(
-    @Column(name = "coupon_id", nullable = false)
+    // **컬럼 nullable=true** — `ReservationModel.couponSnapshot` 자체가 `CouponSnapshot?` (쿠폰 미적용 시 null)
+    // 이라 `@Embedded` 컬럼들도 nullable 이어야 한다. NOT NULL 제약은 Hibernate 가 *embedded 가 null* 일 때
+    // 4 컬럼 모두 NULL 로 INSERT 하므로 위반. 도메인 정합성 (embedded 가 *있을 때* 의 비공백 / 양수) 은 본 클래스
+    // `init` 가드가 단독 책임 — 값이 박힐 때만 검증한다 (verify-code §13 — embedded optional ↔ NOT NULL 사고).
+    @Column(name = "coupon_id", nullable = true)
     val couponId: Long,
-    @Column(name = "coupon_name", nullable = false, length = MAX_NAME_LENGTH)
+    @Column(name = "coupon_name", nullable = true, length = MAX_NAME_LENGTH)
     val couponName: String,
-    @Column(name = "coupon_code", nullable = false, length = MAX_CODE_LENGTH)
+    @Column(name = "coupon_code", nullable = true, length = MAX_CODE_LENGTH)
     val couponCode: String,
     @Enumerated(EnumType.STRING)
-    @Column(name = "coupon_discount_type", nullable = false, length = 16)
+    @Column(name = "coupon_discount_type", nullable = true, length = 16)
     val discountType: DiscountType,
 ) {
     init {
