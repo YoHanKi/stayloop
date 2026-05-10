@@ -835,3 +835,135 @@ worker 5 (wish) raw: DataIntegrityViolationException: ...
 3. **공통 베이스 클래스 추출 시점 도달** — `ConcurrentReservationTest` (A) + `ConcurrentCouponUseTest` (B) + `ConcurrentWishToggleTest` (C) 의 n=3. Phase D-1 (다일자 겹침) 진입 시점에 `AbstractConcurrencyE2ETest` 추출 검토 (`@SpringBootTest` + `@Import(MySqlTestContainersConfig)` + `CountDownLatch` + `Executors.newFixedThreadPool` + `databaseCleanUp.truncateAllTables()` 5요소).
 4. **모바일 30s timeout < `innodb_lock_wait_timeout` 50s** — Phase A/B 박제 그대로 누적 (5주차+ NOWAIT 합류 시점에 해소).
 5. **다회 trial 분포 측정 미진행** — Phase 0 / A / B 와 동일 패턴 영구 한계.
+
+---
+
+# 4주차 ③ Phase D — 다일자 겹침 + 회귀 룰 박제 (2026-05-10 완료)
+
+> **목적**. Phase A (단일 일자 락 race) + Phase B (낙관적 락 + UNIQUE) + Phase C (atomic UPDATE) 가 *각 도메인별 동시성 제어* 를 검증한 데 이어, 본 phase 는 *다일자 겹침 락 순서* + *부분 차감 0* + *데드락 회피* 의 통합 시나리오를 검증. 또한 본 라운드에서 학습한 *동시성 회귀 패턴 3종* 을 `verify-code` 스킬에 영구 룰로 박제 (D-2).
+>
+> **연결된 결정**. `docs/plan/week4/decision.md` D-1 #1 (Inventory 비관적 락 + `date ASC`) / `db-lock-low-level.md` LQ20 (Hibernate Optimization 으로 ORDER BY 가 사라질 위험).
+>
+> **실행 환경**. 2026-05-10, Docker Desktop 27.3.1 / Testcontainers 1.20.6 / MySQL 8.0.45 (`innodb_lock_wait_timeout=50`, `transaction_isolation=REPEATABLE-READ`) / HikariCP `maximumPoolSize=10, connectionTimeout=3s` / Java 17.0.14 / Spring Boot 3.4.4 / Hibernate ORM 6.6.x / Windows 11.
+
+## D-Result-1. 다일자 겹침 동시 예약 — `date ASC` 락 순서가 데드락을 회피
+
+### 배경
+- Phase A 의 `ConcurrentReservationTest` 는 *단일 row 락* 의 race window 0 만 검증 — 10 thread 가 같은 객실 / 같은 일자에 경쟁. 다중 row 락 순서가 *데드락* 을 만들지 않는지는 별도 시나리오 필요.
+- 본 phase 는 *체크인-체크아웃이 겹치는 다일자* 시나리오 — 가장 까다로운 락 순서 회귀 가드.
+
+### 시나리오 설계
+- **A (3박)**: `checkIn=2026-06-10 / checkOut=2026-06-13`, dates = `[6/10, 6/11, 6/12]`.
+- **B (2박)**: `checkIn=2026-06-11 / checkOut=2026-06-13`, dates = `[6/11, 6/12]`.
+- **겹침**: `[6/11, 6/12]`. A 의 unique 일자 = `6/10`.
+- 같은 객실, `totalRooms=1, reservedRooms=0`. 두 thread 가 `CountDownLatch` 로 동시 출발.
+
+### 실측 raw — Hibernate SQL 로그 (`ConcurrentMultiDateReservationTest`, 5.938s 종료)
+
+```sql
+-- A 의 락 시도: 3 일자 모두 ORDER BY 정합
+select drim1_0.date, drim1_0.room_type_id, drim1_0.reserved_rooms, drim1_0.total_rooms
+from daily_room_inventories drim1_0
+where drim1_0.room_type_id=? and drim1_0.date in (?,?,?)
+order by drim1_0.date for update
+
+-- B 의 락 시도: 2 일자 모두 ORDER BY 정합
+select drim1_0.date, drim1_0.room_type_id, drim1_0.reserved_rooms, drim1_0.total_rooms
+from daily_room_inventories drim1_0
+where drim1_0.room_type_id=? and drim1_0.date in (?,?)
+order by drim1_0.date for update
+
+-- 성공한 한 thread 가 inventory 갱신 + reservation INSERT
+update daily_room_inventories set reserved_rooms=?,total_rooms=? where date=? and room_type_id=?  × 2
+insert into reservations (...) values (...)  × 1
+```
+
+### 가설 ↔ 측정 정합
+
+| 가설 (decision.md D-1 #1) | 측정 |
+|---|---|
+| `findInventoriesForUpdate(roomTypeId, dates)` 의 SQL 이 `ORDER BY date ASC` 박제 → 두 thread 가 동일 순서로 락 획득 → cycle 미발생 | ✅ SQL 로그에서 두 thread 모두 `order by drim1_0.date for update` 발행 — Hibernate Optimization 으로 ORDER BY 가 *사라지지 않음* |
+| 데드락 발생 시 30s 안 종료 X (테스트 hang) | ✅ 5.938s 종료 — 락 획득 순서 정합으로 cycle 0, 첫 thread commit 후 두 번째 thread 가 락 획득 → 가용 0 → CONFLICT throw → rollback (빠른 흐름) |
+| **부분 차감 0** — 실패한 측의 *unique 일자도 차감되지 않음* (`@Transactional` rollback 의 atomicity) | ✅ B 가 성공한 시나리오에서 `6/10 reserved=0` (B 가 6/10 사용 안 함) — A 의 `[6/10] FOR UPDATE` 가 락은 잡았지만 가용 0 발견 후 rollback → 6/10 reserved 변경 0 |
+| 다일자 겹침에서 정확히 1명만 성공 | ✅ 어설션 `successesA + successesB == 1` 통과 |
+
+### 채택 결정 — `date ASC` 락 순서 정책 *유지 + 정식 회귀 룰 승격* (D-2)
+
+- `findInventoriesForUpdate` 의 QueryDSL 빌더에 `orderBy(d.date.asc())` 박제 (Phase A 합류).
+- `ReservationFacade` 의 `period.datesToReserve().sorted()` Facade 진입점 정렬 박제 (Phase A 합류).
+- **본 phase 의 회귀 가드**: ConcurrentMultiDateReservationTest 가 *데드락 발생 시 30s 안 종료 X* 의 묵시적 회귀 가드.
+- **D-2 의 회귀 룰 정식 승격**: verify-code §9 동시성 / §16 트랜잭션 / §12 예외 처리 에 동시성 회귀 패턴 3종 박제 — 미래 새 도메인이 비관적 락 합류 시 *문서 ↔ 가드 정합* 이 유지되게 (자세히는 D-Result-2 참조).
+
+### 영구 한계
+- **2 thread 시나리오 한정** — Phase A 의 10 thread 단일 row 와 비교하면 *동시성 압력* 이 작음. 5주차+ 부하 라운드에서 N 개의 다일자 겹침 thread (`@RepeatedTest` 또는 k6 ramp-up) 로 *데드락 빈도 분포* 측정 권장.
+- **`innodb_lock_wait_timeout=50s` 의존** — 본 시나리오는 첫 thread commit 까지 빠른 흐름이라 50s 도달 X. 대용량 다일자 (예: 30박) 라면 락 hold 시간이 늘어 두 번째 thread 가 timeout 위험. 5주차+ 부하 시점에 NOWAIT 또는 짧은 timeout 합류 결정 (Phase A D-10 참조).
+
+---
+
+## D-Result-2. verify-code 회귀 룰 3종 박제 — 동시성 학습의 영구 가드 (D-2)
+
+### 배경
+- 4주차 ③ 의 Phase A/B/C/D 진행 중 발견한 *동시성 회귀 패턴* 을 미래 라운드 / 새 도메인이 무심코 깨지 않게 verify-code 에 영구 룰로 박제. 본 박제는 commit `e7b0574` 의 git-추적 SSOT.
+
+### 박제된 룰 3종
+
+| § | 룰 | 발견 시점 | 위험 |
+|---|---|---|---|
+| **§9 동시성** | 다일자 (다중 row) 비관적 락 시 `ORDER BY date ASC` 가 *SQL 과 진입점 (Facade)* 양쪽에 명시. 한쪽만 있으면 *Hibernate Optimization* 으로 ORDER BY 가 사라지거나 *Facade 호출자가 정렬 누락* 시 락 순서 비결정. | Phase A (`findInventoriesForUpdate` + Facade `.sorted()` 두 곳 정렬) | 데드락 victim 빈발 — InnoDB cycle 검출이 *runtime* 만 잡음 (정적 검출 X) |
+| **§9 동시성** | 운영 atomic UPDATE 의 InMemory 더블이 *같은 인스턴스* 를 mutate 시 Facade 응답값 동치 깨짐. atomic 호출 *이전* 의 값을 별도 변수로 박제 (`countBefore`) 패턴이 정합. | Phase C (`WishlistFacadeTest` 의 `info.wishCount=2` 실패) | 운영-테스트 더블 정책 비대칭 — 단위 테스트가 통과해도 운영에서 다른 결과 |
+| **§12 예외 처리** | JPA 예외 (`OptimisticLockingFailureException` / `DataIntegrityViolationException` / `LockTimeoutException` / `PessimisticLockingFailureException`) 가 도메인 메시지로 *그대로* 노출되면 (a) 식별자 노출 (PK 컬럼 / row 값), (b) 도메인 의미 부재, (c) ApiControllerAdvice 매핑 불일치. **Facade try/catch 로 `CoreException(CONFLICT, "<도메인 메시지>", cause = e)` 변환**. | Phase B (`ReservationFacade` 의 두 catch 블록) | 보안 위험 + 사용자 혼란 + 응답 일관성 깨짐 |
+| **§16 트랜잭션** | `@Lock(PESSIMISTIC_WRITE)` / `setLockMode(PESSIMISTIC_WRITE)` / `saveAndFlush` 메서드를 *`@Transactional` 밖* 에서 호출하면 *목적 자체* 무력화 — 락 즉시 해제 / 호출 시점 throw 의미 깨짐. 도메인 Repository 인터페이스 KDoc 에 *"본 메서드는 `@Transactional` 안에서만"* 박제. | Phase A (비관적 락) + Phase B (`saveAndFlush` 의 호출 시점 throw 의미) | 동시성 가드 silent bypass — runtime 회귀가 *프로덕션 부하* 까지 잠복 |
+
+### §22 점검 우선순위 갱신
+
+P2 보류 결정의 회귀 가드 목록을 기존 8종 → **11종** 으로 확장:
+- (9) 다일자 락 ORDER BY 미명시
+- (10) JPA 예외 클라이언트 노출
+- (11) `@Lock` / `saveAndFlush` 가 `@Transactional` 밖
+
+미래 라운드에서 본 11종을 P2 로 보류 시 *명시적 사유* 박제 강제.
+
+### 적용 (`feature/concurrency-control` 브랜치 commit `e7b0574`)
+
+`.claude/skills/verify-code/SKILL.md` 의 §9 / §12 / §16 에 신규 룰 라인 + 점검 명령 (Grep 패턴) 추가. §22 의 fast-follow 목록 갱신.
+
+### 영구 한계
+- **회귀 룰의 효과는 *verify-code 호출 빈도* 에 의존** — CLAUDE.md "스킬" 정책에 따라 *기능 구현/리팩토링 직후 자동 호출* 이지만, 잊혀지면 무력화. 5주차+ 라운드에서 verify-code 가 *실제로 본 룰을 잡는지* 의 메타 측정 (회귀 모드 §0-A) 권장.
+
+---
+
+## Phase D 의 실제 commit 2건 (git-추적)
+
+| # | hash | prefix | 메시지 | 변경 단위 |
+|---|---|---|---|---|
+| 1 | `1630a0c` | `feat` | `체크인-체크아웃 겹치는 다일자 동시 예약 E2E 테스트 (3박 ↔ 2박, 마지막 1실) 를 추가한다.` | `application/reservation/ConcurrentMultiDateReservationTest.kt` (1 file, +284) — `@SpringBootTest` + Testcontainers MySQL + 2 thread CountDownLatch + 부분 차감 0 + 데드락 회피 30s 가드 |
+| 2 | `e7b0574` | `skills` | `verify-code 에 다일자 락 ORDER BY / JPA 예외 노출 차단 / Pessimistic 락 트랜잭션 의무 회귀 룰 3종을 추가한다.` | `.claude/skills/verify-code/SKILL.md` (1 file, +31/-3) — §9 / §12 / §16 / §22 갱신 |
+
+**Plan 정합**: D-1 / D-2 가 plan 명시 그대로 분리됨. D-2 의 *plan 변형*: plan 은 룰 (a)/(b)/(c) 3종 명시, 실제는 *Phase B/C 학습* 도 합류해 (a) 다일자 락 ORDER BY + Phase C InMemory mutate 패턴 / (b) JPA 예외 변환 + Phase B 두 catch 블록 패턴 / (c) Pessimistic 락 + Phase B saveAndFlush 트랜잭션 의무 — *4종 룰 + §22 점검 우선순위 갱신* 으로 확장 박제.
+
+## 검증 게이트 결과 (2026-05-10)
+
+| 게이트 | 결과 | 발견 / 메모 |
+|---|---|---|
+| `verify-code` | ✅ PASS | 본 phase 의 변경이 *테스트 신규 + 스킬 박제* 만이라 코드 본문 회귀 영역 없음. P0/P1/P2 0건 |
+| `verify-architecture` | ✅ PASS | 위반 0건 — 신규 테스트는 `application/reservation/` 경로, `@SpringBootTest` 패턴 정합 |
+| `verify-tests` | ✅ PASS | **404 tests / 0 failures / 0 errors** (BUILD SUCCESSFUL in 1m 28s), ktlintCheck PASS. 신규 1건 (ConcurrentMultiDateReservationTest 5.938s) |
+
+## week4-quests Checklist 매핑 (Phase D 시점 — 4 시나리오 모두 완료)
+
+- [x] **Wishlist 동시성 ①** (동일 숙소 찜/찜취소 정합성) — Phase C
+- [x] **Coupon 동시성 ②** (동일 쿠폰 다중 기기 동시 사용) — Phase B
+- [x] **Inventory 동시성 ③** (동일 객실 / 동일 일자 동시 예약 시 더블부킹 X) — Phase A
+- [x] **다일자 겹침 동시성 ④** — 본 Phase D-1
+
+**4주차 ③ `feature/concurrency-control` 브랜치는 Phase 0 / A / B / C / D 모두 완료.** verify-code 회귀 룰 3종 박제로 미래 라운드의 동시성 회귀 가드 *영구 강화*.
+
+## 미해결 위험 박제 (Phase D 누적)
+
+1. **2 thread 시나리오 한정** — 다일자 겹침의 통계적 압력 부족. 5주차+ N thread 부하 측정 권장.
+2. **대용량 다일자 (30박+) 락 hold 시간** — `innodb_lock_wait_timeout=50s` 도달 위험. NOWAIT 또는 짧은 timeout 합류는 5주차+.
+3. **공통 베이스 클래스 추출 시점 도달** — Concurrent\*Test n=4 (A/B/C/D 모두). `AbstractConcurrencyE2ETest` 추출 권장 (verify-code §14 DRY) — 별도 refactor PR 또는 5주차+ 정리 라운드.
+4. **회귀 룰의 효과 메타 측정 미진행** — verify-code 가 *실제로* 본 11종 룰을 잡는지의 회귀 모드 측정 미합류. 5주차+ 라운드.
+5. **모바일 30s timeout < `innodb_lock_wait_timeout` 50s** — Phase A/B/C 박제 그대로 누적.
+6. **`DataIntegrityViolationException` (wishlist UNIQUE) 가 클라이언트로 전파 가능** — Phase C scope 외, 5주차+ 합류.
+7. **다회 trial 분포 측정 미진행** — Phase 0 / A / B / C 와 동일 패턴 영구 한계.
