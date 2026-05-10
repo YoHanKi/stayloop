@@ -27,7 +27,22 @@ import java.time.LocalDateTime
  * 비교해 일치하지 않으면 FORBIDDEN. 본 Facade 는 `LoginId` 만 들고 다니므로 path/header 모두 LoginId 로
  * 비교한다 (실 사용자식별은 `users.id` BIGINT 가 아니라 LoginId 값).
  *
- * **wishCount 동시 증감 정합성** 은 4주차 동시성 영역 — 본 라운드는 단순 read-modify-write.
+ * **wishCount 동시 증감 정합성 — atomic UPDATE 채택** (`docs/plan/week4.md` ③ Phase C-2, decision.md D-1 #4)
+ *
+ * 본 Facade 는 `propertyRepository.atomicIncrementWishCount(propertyId)` /
+ * `atomicDecrementWishCount(propertyId)` 를 호출한다. 운영 SQL 한 줄로 race window 0 — read-modify-write
+ * (`findById → incrementWishCount → save`) 의 lost update 문제를 *DB-side atomic* 으로 차단.
+ *
+ * **`Property.incrementWishCount` / `decrementWishCount` 도메인 메서드는 *마지막 방어선* 으로 유지**:
+ * - 운영 코드는 atomic UPDATE 로 우회 — 도메인 메서드를 호출하지 않는다.
+ * - 그러나 도메인 단위 테스트 (`PropertyModelTest`) 는 도메인 가드 (`wishCount <= 0` CONFLICT) 를 검증.
+ * - InMemory 더블 (`InMemoryPropertyRepository`) 의 atomic 메서드는 *내부적으로* 도메인 메서드를 호출 —
+ *   영속성 단위에서 가드가 그대로 살아있음 (verify-code §19-B 문서 ↔ 가드 정합).
+ * - 미래 운영 코드가 atomic 우회 없이 read-modify-write 로 회귀해도 도메인 메서드의 가드가 *최후의 방어선*.
+ *
+ * **응답 `wishCount` 의 의미** — atomic 호출 후 *그 호출의 +1 박제* 만 응답한다 (`property.wishCount + 1`).
+ * 동시 다른 thread 의 증감은 응답에 반영되지 않으나, *DB 정합성* 은 atomic 으로 보장. UX 측면에서 사용자는
+ * "내 wish 가 적용되었다 + 카운트가 +1 되었다" 를 알면 충분 — 정확한 글로벌 카운트는 별도 조회가 본질.
  *
  * **Read-then-Write SELECT 중복 — 의식적 trade-off (verify-code §17)**
  *
@@ -53,7 +68,7 @@ class WishlistFacade(
     private val log = LoggerFactory.getLogger(javaClass)
 
     /**
-     * 숙소 찜 등록. 이미 찜된 경우 noop (멱등, AC-6).
+     * 숙소 찜 등록. 이미 찜된 경우 noop (멱등, AC-6). wishCount 갱신은 *atomic UPDATE* (Phase C-2).
      */
     @Transactional
     fun wish(loginId: LoginId, propertyId: Long): WishlistToggleInfo {
@@ -62,14 +77,17 @@ class WishlistFacade(
         if (wishlistRepository.existsBy(loginId, propertyId)) {
             return WishlistToggleInfo(propertyId = propertyId, wished = true, wishCount = property.wishCount)
         }
+        // atomic 호출 *이전* 의 wishCount 를 박제 — 운영 (JPA `update().execute()`) 은 entity manager 를 우회해
+        // 로컬 entity 가 stale 로 남고, InMemory 는 도메인 메서드를 통해 같은 인스턴스를 mutate. 두 의미를
+        // *동치* 로 만들기 위해 Facade 가 "atomic 호출 전 값 + 1" 을 응답으로 약속 (verify-code §19-A).
+        val countBefore = property.wishCount
         wishlistRepository.save(loginId, propertyId, LocalDateTime.now(clock))
-        property.incrementWishCount()
-        propertyRepository.save(property)
-        return WishlistToggleInfo(propertyId = propertyId, wished = true, wishCount = property.wishCount)
+        propertyRepository.atomicIncrementWishCount(propertyId)
+        return WishlistToggleInfo(propertyId = propertyId, wished = true, wishCount = countBefore + 1)
     }
 
     /**
-     * 숙소 찜 취소. 찜되지 않은 경우 noop (멱등, AC-6).
+     * 숙소 찜 취소. 찜되지 않은 경우 noop (멱등, AC-6). wishCount 갱신은 *atomic UPDATE* (Phase C-2).
      */
     @Transactional
     fun unwish(loginId: LoginId, propertyId: Long): WishlistToggleInfo {
@@ -78,10 +96,13 @@ class WishlistFacade(
         if (!wishlistRepository.existsBy(loginId, propertyId)) {
             return WishlistToggleInfo(propertyId = propertyId, wished = false, wishCount = property.wishCount)
         }
+        val countBefore = property.wishCount
         wishlistRepository.deleteBy(loginId, propertyId)
-        property.decrementWishCount()
-        propertyRepository.save(property)
-        return WishlistToggleInfo(propertyId = propertyId, wished = false, wishCount = property.wishCount)
+        // atomic UPDATE — `WHERE wish_count > 0` 가드로 음수 진입 차단. affected = 0 시 응답은 *atomic 호출 전*
+        // 값 유지 (race 로 다른 thread 가 먼저 0 으로 만들었을 가능성 — DB 정합성은 atomic 으로 보장).
+        val affected = propertyRepository.atomicDecrementWishCount(propertyId)
+        val responseCount = if (affected == 1) (countBefore - 1).coerceAtLeast(0) else countBefore
+        return WishlistToggleInfo(propertyId = propertyId, wished = false, wishCount = responseCount)
     }
 
     /**
