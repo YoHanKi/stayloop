@@ -57,6 +57,44 @@ class PropertyRepositoryImpl(
     override fun deleteById(id: Long) = propertyJpaRepository.deleteById(id)
 
     /**
+     * `wishCount` 1 증가 — QueryDSL `update().set(...).execute()`. (`docs/plan/week4/decision.md` D-6 정합)
+     *
+     * 운영 SQL: `UPDATE properties SET wish_count = wish_count + 1 WHERE id = ?` — read-modify-write 우회.
+     * `@Modifying @Query` 대신 QueryDSL 채택 — 컴파일 시점 컬럼 오타 차단 + `@Query` 전면 제거 정책 정합.
+     *
+     * **persistence context staleness 주의**: 본 메서드는 entity manager 를 우회 — 같은 TX 안에서 미리 로드된
+     * `PropertyModel` 의 `wishCount` 는 stale 상태로 남는다. WishlistFacade 흐름은 atomic 호출 후 *그
+     * PropertyModel 을 다시 사용하지 않으므로* 안전 (응답의 wishCount 는 *본 호출의 +1 박제* — 동시 다른
+     * thread 의 증감은 응답에 반영되지 않으나, DB 정합성은 atomic 으로 보장).
+     */
+    override fun atomicIncrementWishCount(propertyId: Long): Int {
+        val p = QPropertyModel.propertyModel
+        return queryFactory
+            .update(p)
+            .set(p.wishCount, p.wishCount.add(1))
+            .where(p.id.eq(propertyId))
+            .execute()
+            .toInt()
+    }
+
+    /**
+     * `wishCount` 1 감소 — *음수 진입 SQL 차단* `WHERE wish_count > 0`.
+     *
+     * 운영 SQL: `UPDATE properties SET wish_count = wish_count - 1 WHERE id = ? AND wish_count > 0`.
+     * `wish_count = 0` 인 row 는 affected = 0 (멱등 noop) — 미찜 상태에 unwish 가 잘못 호출되어도 DB 가
+     * 영구히 어긋나지 않는다 (decision.md D-1 #4).
+     */
+    override fun atomicDecrementWishCount(propertyId: Long): Int {
+        val p = QPropertyModel.propertyModel
+        return queryFactory
+            .update(p)
+            .set(p.wishCount, p.wishCount.subtract(1))
+            .where(p.id.eq(propertyId).and(p.wishCount.gt(0)))
+            .execute()
+            .toInt()
+    }
+
+    /**
      * 도메인 정렬 어휘 → QueryDSL `OrderSpecifier` 변환. 화이트리스트 미등록 키는 BAD_REQUEST.
      * `@Embedded` VO 는 *내부 path* 로 명시 (Rating → `rating.value`, Name → `name.value`).
      */

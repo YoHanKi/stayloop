@@ -42,6 +42,29 @@ class InMemoryPropertyRepository : PropertyRepository {
     }
 
     /**
+     * 운영 RepositoryImpl 의 `UPDATE ... SET wish_count = wish_count + 1 WHERE id = ?` 와 동일 의미론.
+     * 미존재 propertyId → affected = 0 (멱등). 존재 → 도메인 메서드 호출 (마지막 방어선) + affected = 1.
+     */
+    override fun atomicIncrementWishCount(propertyId: Long): Int {
+        val property = store[propertyId] ?: return 0
+        property.incrementWishCount()
+        return 1
+    }
+
+    /**
+     * 운영 SQL `UPDATE ... SET wish_count = wish_count - 1 WHERE id = ? AND wish_count > 0` 와 동등.
+     * `wish_count <= 0` 또는 미존재 → affected = 0 (멱등 noop). 도메인 메서드 (`decrementWishCount`) 의
+     * `CONFLICT` throw 동작은 `wish_count > 0` 가드를 *먼저* 통과한 후에만 호출되도록 정렬 — InMemory 가
+     * 운영 SQL 의 *조건부 갱신* 의미를 그대로 재현 (verify-code §19-A 운영-테스트 동치).
+     */
+    override fun atomicDecrementWishCount(propertyId: Long): Int {
+        val property = store[propertyId] ?: return 0
+        if (property.wishCount <= 0) return 0
+        property.decrementWishCount()
+        return 1
+    }
+
+    /**
      * 다중 sort key 를 차례로 합성해 적용한다 (운영 RepositoryImpl 의 `Sort.by(orders)` 와 동일 의미론).
      * 첫 키만 적용하면 운영 ↔ 테스트 동작이 갈려 회귀가 마스킹된다 (Copilot 3차 가드).
      */
