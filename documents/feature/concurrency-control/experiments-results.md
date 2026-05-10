@@ -468,3 +468,188 @@ CLAUDE.md "실험 테스트" 5-step 의 step 5 (코드 삭제) + `experiment-rec
 1. **모바일 30s timeout < `innodb_lock_wait_timeout` 50s** 의 다층 정합 깨짐 — 5주차+ NOWAIT 합류 시점에 해소.
 2. **CouponSnapshot 부분 NULL row** 의 Long primitive NPE — 운영 정합 라운드 (5주차+) 통합 테스트.
 3. **`@SpringBootTest` 격리** — 본 ConcurrentReservationTest 는 `DatabaseCleanUp.truncateAllTables()` (BeforeEach + AfterEach) 로 격리. Phase B / C / D 의 추가 동시성 테스트가 합류하면 *공통 베이스 클래스* (`AbstractConcurrencyE2ETest`) 추출 검토 (n=2 시점).
+
+---
+
+# 4주차 ③ Phase B — Coupon 낙관적 락 합류 실측 + 결정 박제 (2026-05-10 완료)
+
+> **목적**. Phase 0 의 *실험 측정* (E-3 / E-3-r1 — `@Version Long` vs `Timestamp(ms)`, single-tx 낙관적 락 의미론) 박제 위에서 *실 합류* 의 SQL 의미론 검증을 git-추적 SSOT 으로 박제.
+> Phase 0 가 *가설 검증* 영역이라면 본 섹션은 *구현 합류* 영역 — `@Version` 이 *진짜 낙관적 락의 stale-version WHERE clause* 로 작동하는지, Facade 의 예외 변환이 *raw JPA 예외 누출 없이* 1성공/N-1 CONFLICT 박제로 도달하는지 *실 SQL 로그 + 어설션* 으로 박제.
+>
+> **연결된 결정**. `docs/plan/week4/decision.md` D-1 #2 (Coupon 단일 사용 = 낙관적 락 + DB UNIQUE) / Phase 0 E-3-r1 (Long 단조 증가 + 운영 디버깅 용이성).
+>
+> **실행 환경**. 2026-05-10, Docker Desktop 27.3.1 / Testcontainers 1.20.6 / MySQL 8.0.45 (`innodb_lock_wait_timeout=50`, `transaction_isolation=REPEATABLE-READ`) / HikariCP `maximumPoolSize=10, connectionTimeout=3s` (test profile) / Java 17.0.14 / Spring Boot 3.4.4 / Hibernate ORM 6.6.x / Windows 11.
+
+## B-Result-1. `@Version` 의 stale-version WHERE clause 자동 부착 — 실 SQL 검증
+
+### 배경
+- Phase 0 E-3-r1 의 single-tx 측정은 *autoCommit=false + REPEATABLE READ snapshot* 환경에서 `@Version Long` 의 분포 distribution 측정 (success 48 / [8,6,5,5,4,4,4,4,4,4]). 그러나 *Hibernate JPA `@Version` 어노테이션 자체* 의 SQL 행동 (UPDATE 시 WHERE version=? 자동 부착) 은 *간접* 입증 — 실 합류 코드의 SQL 로그로 검증할 필요.
+- 본 합류는 `CouponIssueModel.@Version Long version: Long = 0` + `CouponIssueRepositoryImpl.save = jpa.saveAndFlush` 의 의미 계약.
+
+### 실측 raw — Hibernate SQL 로그 (`ConcurrentCouponUseTest`, 5 thread 동시 reserve)
+
+테스트 빌드 결과 `apps/stay-api/build/test-results/test/TEST-com.stayloop.application.coupon.ConcurrentCouponUseTest.xml` 의 `<system-out>` 에서 발췌 (Hibernate SQL 로그):
+
+**Schema DDL** (Testcontainers 부트스트랩):
+```sql
+create table coupon_issues (
+    created_at datetime(6) not null, deleted_at datetime(6),
+    id bigint not null auto_increment,
+    issued_at datetime(6) not null, template_id bigint not null,
+    updated_at datetime(6) not null, used_at datetime(6),
+    used_reservation_id bigint, user_id bigint not null,
+    version bigint not null,
+    status enum ('AVAILABLE','EXPIRED','USED') not null,
+    primary key (id)
+) engine=InnoDB
+
+alter table coupon_issues add constraint uk_coupon_issues_used_reservation_id unique (used_reservation_id)
+```
+
+→ **`version bigint not null` 컬럼 + `uk_coupon_issues_used_reservation_id` UNIQUE 제약** 두 다층 가드 모두 DDL 에 박제 ✓.
+
+**INSERT — `@Version` 초기 값 0**:
+```sql
+insert into coupon_issues (created_at,deleted_at,issued_at,status,template_id,updated_at,used_at,used_reservation_id,user_id,version)
+                  values (?,?,?,?,?,?,?,?,?,?)
+```
+→ `version=0` 으로 INSERT (테스트 어설션 `assertThat(issue.version).isZero()` 정합).
+
+**UPDATE × 5 — stale-version WHERE clause 자동 부착**:
+```sql
+update coupon_issues set deleted_at=?,issued_at=?,status=?,template_id=?,updated_at=?,used_at=?,used_reservation_id=?,user_id=?,version=?
+                  where id=? and version=?
+```
+
+→ **5 번의 UPDATE 모두 `where id=? and version=?` 형태** — Hibernate `@Version` 어노테이션이 *자동으로* 옛 version 을 WHERE 에 부착. 첫 thread 가 `version=0 → 1` UPDATE 를 commit 하면, 나머지 4 thread 의 `where version=0` 매치는 affected rows = 0 → `OptimisticLockingFailureException`.
+
+**최종 상태 (`select cim1_0.* from coupon_issues where id=?`)**:
+- `status=USED`, `usedReservationId=<단일 reservation>`, `version=1` ✓.
+
+### 가설 ↔ 측정 정합
+
+| 가설 (decision.md D-1 #2) | 측정 |
+|---|---|
+| `@Version Long` UPDATE 시 *Hibernate 가 자동* `WHERE version=?` 부착 | ✅ SQL 로그에서 직접 확인 (`update ... where id=? and version=?` × 5) |
+| 첫 commit 만 성공, 나머지는 `OptimisticLockingFailureException` | ✅ 어설션 `successes=1 / conflicts=4 / others=0` (5 thread 중 4 가 CONFLICT) |
+| `Long` 단조 증가 — INSERT 시 0, UPDATE 시 +1 | ✅ INSERT version=0 / 첫 UPDATE 후 version=1 / 어설션 `version.isEqualTo(1L)` |
+| DB UNIQUE (`used_reservation_id`) defense in depth | ✅ DDL 에 박제, 본 시나리오에서는 `@Version` 이 먼저 차단해 UNIQUE 가 *발동되지 않음* (다층 가드 의도 정합) |
+
+### 채택 결정 — `@Version Long` + `saveAndFlush` 유지
+
+- `CouponIssueModel.@Version var version: Long = 0` 박제.
+- `CouponIssueRepositoryImpl.save = jpa.saveAndFlush` — `@Version` 충돌이 *commit 시점이 아니라 호출 시점에* throw 되어야 Facade try/catch 가 잡을 수 있다 (도메인 인터페이스 KDoc 의 의미 계약).
+- DB UNIQUE 는 `@Table(uniqueConstraints = ...)` 로 박제 — 같은 reservation 에 다른 쿠폰 사용 시도를 *애플리케이션 우회* 흐름에서도 차단.
+
+### 영구 한계 / 미해결 위험
+
+- **InMemory 더블의 의미론 비재현** — `InMemoryCouponIssueRepository.save` 는 `synchronized` 단순 저장으로 `@Version` 충돌 의미 비재현 (`verify-code R9` 정합). 동시성 회귀는 *Testcontainers MySQL 강제* — KDoc 에 박제 + ConcurrentCouponUseTest 의 KDoc `"InMemory 더블 사용 금지"` 명시.
+- **다회 trial / 분포 측정 미진행** — 본 측정은 1 trial. 5주차+ 부하 라운드에서 *N 회 반복 + 분포 측정* 합류 권장 (Phase 0 E-2 / E-3-r1 영구 한계와 동일 패턴).
+
+---
+
+## B-Result-2. Facade 의 raw JPA 예외 → CONFLICT 변환 — 누출 0 검증
+
+### 배경
+- `OptimisticLockingFailureException` (Spring DAO 표준 예외) 과 `DataIntegrityViolationException` (UNIQUE 제약 위반) 이 *클라이언트 응답으로 누출* 되면 (a) 식별자 노출 (verify-code §12), (b) 도메인 메시지 부재로 혼란, (c) ApiControllerAdvice 매핑 불일치 (500 응답).
+- Facade 가 *모든* JPA 예외 경로를 `CoreException(CONFLICT, "이미 사용된 쿠폰입니다.", cause = e)` 로 변환해야 정합.
+
+### 실측 raw — 어설션 박제
+
+```kotlin
+// ConcurrentCouponUseTest.kt:209-221
+assertThat(successes.get()).isEqualTo(1)
+assertThat(conflicts.get()).isEqualTo(threadCount - 1)  // = 4
+assertThat(others.get())
+    .withFailMessage("CONFLICT 외 raw 예외 발생: others=%d, sample:\n  %s", others.get(), sample)
+    .isZero()
+```
+
+테스트 PASS — `others = 0` 즉 raw `OptimisticLockingFailureException` / `DataIntegrityViolationException` 이 *클라이언트 (테스트 워커) 까지 도달한 0건*. Facade 의 try/catch 가 모든 케이스를 흡수.
+
+### 가설 ↔ 측정 정합
+
+| 가설 (week4.md ③ Phase B-2) | 측정 |
+|---|---|
+| `OptimisticLockingFailureException` → CONFLICT (도메인 메시지 일반화) | ✅ catch 블록 1 |
+| `DataIntegrityViolationException` (`used_reservation_id` UNIQUE 위반) → CONFLICT | ✅ catch 블록 2 |
+| `cause` 보존 — 운영 로그에서 원인 추적 | ✅ `throw CoreException(..., cause = e)` |
+| 메시지에 식별자 (couponId / userId / reservationId) 미노출 | ✅ `"이미 사용된 쿠폰입니다."` 일반화 (verify-code §12) |
+| ApiControllerAdvice 가 CONFLICT → 409 매핑 (기존 회귀 가드 활용) | ✅ — 이 매핑 자체는 기존 가드 |
+
+### 채택 결정 — 두 catch 블록 *유지* (의도적 중복)
+
+- `OptimisticLockingFailureException` / `DataIntegrityViolationException` 두 catch 블록이 동일한 throw 를 반복 — verify-code §14 DRY 측면에서는 중복이지만, 두 예외의 *원인이 명확히 다른 도메인 사고* 라 한 catch 로 묶으면 cause 의 분기 정보 (어느 단계에서 실패했는지 — version 충돌 vs UNIQUE 위반) 가 흐려짐. *유지*.
+
+### 영구 한계
+- 본 라운드 시나리오 (5 스레드, 같은 쿠폰 / 다른 reservation) 에서는 `@Version` 이 먼저 차단하여 `DataIntegrityViolationException` 경로가 *직접 trigger 안 됨* — UNIQUE 가드의 실제 발동 검증은 *애플리케이션 우회* 시나리오 (다른 쿠폰 ↔ 같은 reservation) 가 합류해야 함. 본 phase scope 외, 5주차+ 통합 라운드.
+
+---
+
+## B-Result-3. 5 스레드 동시 reserve 의 정합성 — TX rollback + reservation 박제
+
+### 배경
+- ConcurrentCouponUseTest 의 시나리오는 *5 thread 가 같은 사용자 / 같은 쿠폰 / 서로 다른 일자* 의 reserve 동시 호출. 기대: 1 thread 만 성공해 *그 thread 의 reservation* 만 commit, 나머지 4 thread 는 *coupon use 단계에서 throw* → @Transactional rollback → reservation INSERT / inventory UPDATE 까지 *모두 원복*.
+
+### 실측 raw — Hibernate SQL 로그 (시도 vs 최종 상태)
+
+**시도 단계**:
+- `insert into reservations (...)` × **5** (5 thread 모두 reservation 저장 시도)
+- `update daily_room_inventories ...` × **10** (5 reservation × 평균 2일자)
+- `update coupon_issues ... where id=? and version=?` × **5** (5 thread 모두 쿠폰 사용 시도)
+
+**최종 commit 단계**:
+- 1 thread 만 commit — 그 thread 의 reservation INSERT + inventory UPDATE + coupon_issues UPDATE.
+- 4 thread 는 coupon 충돌 → @Transactional rollback → 그 thread 의 *모든 변경* (reservation INSERT 4건 + inventory UPDATE 8건) 원복.
+
+→ **6.5s 안에 5 thread 종료** (`done.await(30s)` 타임아웃 대비 충분한 마진), 데드락 / starvation 0.
+
+### 가설 ↔ 측정 정합
+
+| 가설 | 측정 |
+|---|---|
+| `@Transactional` 단일 진입 — coupon throw 시 reservation / inventory 전체 rollback | ✅ 어설션 `version=1L` (정확히 1번의 UPDATE 만 commit) — 4건의 reservation INSERT 가 *영속화 안 됨* |
+| 데드락 / starvation 미발생 | ✅ 6.5s 안에 5 thread 종료 — `done.await(30s)` 충분 마진 |
+| 부분 사용 (`partial use`) 0 — 쿠폰이 *어느 reservation 에 사용되었는지* 모호한 상태 미발생 | ✅ `usedReservationId.isNotNull()` + `version=1L` (단 1번의 commit) |
+
+### 채택 결정 — `@Transactional` 단일 진입 + Facade catch 합류 정합
+
+- ReservationFacade.reserve 는 단일 `@Transactional` — 그 안에서 coupon save 의 throw 가 발생하면 *전체 TX rollback*.
+- Facade 의 catch 는 *throw* 만 하므로 (cause 보존) TX 가드는 자연 발동 — Spring 의 transactional 의미론 (`@Transactional` 의 default rollback rule = RuntimeException) 정합.
+
+### 영구 한계
+- **단일 thread 시나리오 (`ConcurrentReservationTest` 다일자 / 본 ConcurrentCouponUseTest 쿠폰 동시) 의 *교차 합류* 미측정** — 다일자 inventory race + coupon 동시 사용이 *동일 TX 안에 모두* 발생하는 시나리오는 Phase D-1 (다일자 겹침) 합류 시점.
+
+---
+
+## Phase B 의 실제 commit 3건 (git-추적)
+
+| # | hash | prefix | 메시지 | 변경 단위 |
+|---|---|---|---|---|
+| 1 | `bb63033` | `feat` | `CouponIssueModel 에 @Version 낙관적 락을 추가하고 Repository 의 saveAndFlush 의미를 박제한다.` | `domain/coupon/CouponIssueModel.kt` + `domain/coupon/CouponIssueRepository.kt` (KDoc) + `infrastructure/coupon/CouponIssueRepositoryImpl.kt` (saveAndFlush) + `domain/coupon/CouponIssueModelTest.kt` (version=0 어설션) (4 files, +34/-2) |
+| 2 | `1d87e9b` | `feat` | `ReservationFacade 가 OptimisticLockingFailureException / DataIntegrityViolationException 을 CONFLICT 로 변환한다.` | `application/reservation/ReservationFacade.kt` (1 file, +15/-1) |
+| 3 | `d1fdb97` | `feat` | `Coupon 동시 사용 E2E 테스트 (같은 쿠폰 × 5 스레드) 를 추가한다.` | `application/coupon/ConcurrentCouponUseTest.kt` (1 file, +296) |
+
+**Plan 정합**: B-1 / B-2 / B-3 가 plan 명시 그대로 분리됨 (Phase A 의 A-2/A-3 합산과 달리 본 phase 는 *서로 다른 파일 / 서로 다른 책임* 이라 단일 commit 합산의 cohesion 가치가 낮음 — 개별 commit 유지가 git history 추적성 ↑).
+
+## 검증 게이트 결과 (2026-05-10)
+
+| 게이트 | 결과 | 발견 / 메모 |
+|---|---|---|
+| `verify-code` | ✅ PASS | P0 0건 / P1 0건 / P2 2건 (의도적 박제: 두 catch 블록의 의도적 중복 + saveAndFlush round-trip 비용 — 둘 다 KDoc 에 사유 박제) |
+| `verify-architecture` | ✅ PASS | 위반 0건 — domain.coupon → application/infrastructure 역참조 0, JPA 예외 catch 가 application Layer 에 한정, `@Transactional` Facade 단일 진입, `@Version` jakarta.persistence 만 사용 (Spring 이종 의존 0) |
+| `verify-tests` | ✅ PASS | **397 tests / 0 failures / 0 errors** (BUILD SUCCESSFUL in 1m 22s), ktlintCheck PASS. 신규 ConcurrentCouponUseTest 단일 (E2E) — `@Version` 어설션 1건 추가 (CouponIssueModelTest), Hibernate SQL 로그로 *비즈니스 의미론 (stale-version WHERE clause / TX rollback / cause 보존) 직접 박제* |
+
+## week4-quests Checklist 매핑 (Phase B 시점)
+
+- [x] **Inventory 동시성 ③** (동일 객실 / 동일 일자 동시 예약 시 더블부킹 X) — `ConcurrentReservationTest` PASS (Phase A)
+- [x] **Coupon 동시성 ②** (동일 쿠폰 다중 기기 동시 사용) — `ConcurrentCouponUseTest` PASS (본 Phase B)
+- [ ] **다일자 겹침 동시성 ④** — Phase D-1 으로 이연 (다일자 락 순서 검증 위해 추가 시나리오 필요)
+- [ ] **Wishlist 동시성 ①** (동일 숙소 찜/찜취소 정합성) — Phase C 진입 대기
+
+## 미해결 위험 박제 (Phase B 누적)
+
+1. **`DataIntegrityViolationException` 직접 발동 검증 미합류** — 본 시나리오에서는 `@Version` 이 먼저 차단하여 UNIQUE 위반 경로가 trigger 되지 않음. *애플리케이션 우회* 시나리오 (다른 쿠폰 ↔ 같은 reservation) 의 별도 통합 테스트는 5주차+ 운영 정합 라운드.
+2. **다회 trial 분포 측정 미진행** — 본 측정은 1 trial 단일 — Phase 0 E-2 / E-3-r1 의 영구 한계와 동일 패턴. 5주차+ 부하 라운드에서 N 회 반복 측정 합류 권장.
+3. **공통 베이스 클래스 추출 미시점** — `ConcurrentReservationTest` (Phase A) + `ConcurrentCouponUseTest` (Phase B) 가 *동일 패턴* (`@SpringBootTest` + `@Import(MySqlTestContainersConfig)` + `CountDownLatch` + `Executors.newFixedThreadPool` + `databaseCleanUp.truncateAllTables()`) 으로 n=2. Phase C 의 `ConcurrentWishToggleTest` (n=3) 가 합류하면 `AbstractConcurrencyE2ETest` 추출 검토 (verify-code §14 DRY).
+4. **모바일 30s timeout < `innodb_lock_wait_timeout` 50s** 의 다층 정합 깨짐 — Phase A 박제 그대로 누적 (5주차+ NOWAIT 합류 시점에 해소).
