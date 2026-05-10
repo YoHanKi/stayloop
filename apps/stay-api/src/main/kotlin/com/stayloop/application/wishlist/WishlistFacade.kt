@@ -99,7 +99,12 @@ class WishlistFacade(
         val countBefore = property.wishCount
         wishlistRepository.deleteBy(loginId, propertyId)
         // atomic UPDATE — `WHERE wish_count > 0` 가드로 음수 진입 차단. affected = 0 시 응답은 *atomic 호출 전*
-        // 값 유지 (race 로 다른 thread 가 먼저 0 으로 만들었을 가능성 — DB 정합성은 atomic 으로 보장).
+        // 값 유지. *영향 race 시나리오 두 축* (DB 정합성은 atomic 이 양쪽 모두 보장):
+        // (a) 다른 thread 가 *먼저 0 으로 만든* 케이스 — 본 unwish 의 atomic 이 noop, countBefore 도 stale
+        //     (이미 0). 응답 wishCount=0 정합.
+        // (b) 본 unwish 가 진행되는 동안 *다른 thread 가 wish 로 +1* 한 케이스 — REPEATABLE_READ snapshot 으로
+        //     countBefore 가 stale 일 수 있음. 응답 wishCount 가 *본 thread 가 본 값* 이고 *글로벌 카운트* 는
+        //     아님 — 사용자 UX 측면에서는 "내 unwish 가 적용됐다 + 카운트가 -1 됐다" 만 알면 충분.
         val affected = propertyRepository.atomicDecrementWishCount(propertyId)
         val responseCount = if (affected == 1) (countBefore - 1).coerceAtLeast(0) else countBefore
         return WishlistToggleInfo(propertyId = propertyId, wished = false, wishCount = responseCount)
