@@ -965,5 +965,111 @@ P2 보류 결정의 회귀 가드 목록을 기존 8종 → **11종** 으로 확
 3. **공통 베이스 클래스 추출 시점 도달** — Concurrent\*Test n=4 (A/B/C/D 모두). `AbstractConcurrencyE2ETest` 추출 권장 (verify-code §14 DRY) — 별도 refactor PR 또는 5주차+ 정리 라운드.
 4. **회귀 룰의 효과 메타 측정 미진행** — verify-code 가 *실제로* 본 11종 룰을 잡는지의 회귀 모드 측정 미합류. 5주차+ 라운드.
 5. **모바일 30s timeout < `innodb_lock_wait_timeout` 50s** — Phase A/B/C 박제 그대로 누적.
-6. **`DataIntegrityViolationException` (wishlist UNIQUE) 가 클라이언트로 전파 가능** — Phase C scope 외, 5주차+ 합류.
+6. **`DataIntegrityViolationException` (wishlist UNIQUE) 가 클라이언트로 전파** — `ApiControllerAdvice.handleConflict` 글로벌 fallback 으로 *raw 노출은 차단됨* (`"이미 사용 중인 정보입니다."` 일반화). 도메인 의미와 약간 어긋난 일반 메시지 — Wishlist 도메인-특화 변환은 5주차+ 합류 (정정: 본래 "raw 클라이언트 전파" 박제는 부정확, 글로벌 fallback 효과를 누락).
 7. **다회 trial 분포 측정 미진행** — Phase 0 / A / B / C 와 동일 패턴 영구 한계.
+
+---
+
+# 4주차 ③ Phase D 종료 후 — 냉정 모드 라운드 (2026-05-10 완료)
+
+> **목적**. Phase D 종료 후 사용자가 *"더 냉정하고 꼼꼼하게"* 명시 → verify-code 의 *냉정 모드* (신규 §0-B) 진입. PR 전체 (75 파일) 의 *cross-phase 정합* + *catch scope / 분포 시나리오 / 어설션 강도* 까지 깊게 본 결과 **P1 1건 발견 + Round 2 자체 회귀로 defect zero 도달**. 본 라운드의 메타 자산은 `.claude/skills/verify-code/SKILL.md` 의 *§0-B 냉정 모드 6 체크리스트* 영구 박제.
+
+## CE-Result-1. F1 발견 — `coupon.issue.use(...)` 의 try 블록 밖 throw → 메시지 일관성 깨짐
+
+### 배경
+- Phase B-2 (`1d87e9b`) 의 `ReservationFacade.reserve` 흐름:
+  ```kotlin
+  coupon.issue.use(actor = coupon.actorId, reservationId = saved.id, now = now)  // ← try 밖
+  try {
+      couponIssueRepository.save(coupon.issue)
+  } catch (e: OptimisticLockingFailureException) { throw CoreException(CONFLICT, "이미 사용된 쿠폰입니다.", cause = e) }
+  catch (e: DataIntegrityViolationException) { throw CoreException(CONFLICT, "이미 사용된 쿠폰입니다.", cause = e) }
+  ```
+- ConcurrentCouponUseTest 의 어설션이 `errorType == CONFLICT` 만 검증, *customMessage 일관성* 미검증으로 Phase B 합류 시점에 *silent 통과*.
+
+### 분포 시나리오 추론 (verify-code §0-B CE-2)
+
+REPEATABLE_READ snapshot 분포에 따라 *같은 도메인 사고 (이미 사용된 쿠폰의 동시 사용)* 가 *3 흐름* 으로 발생 가능:
+
+| 흐름 | 시나리오 | throw 위치 | 응답 메시지 (fix 전) |
+|---|---|---|---|
+| (a) 분포 1 | TX_B 가 TX_A commit *이전* 시작 | `saveAndFlush` 시 stale version → `OptimisticLockingFailureException` | catch → `"이미 사용된 쿠폰입니다."` ✓ |
+| (b) UNIQUE 위반 | 다른 reservation 에 같은 쿠폰 사용 시도 | `saveAndFlush` 시 `DataIntegrityViolationException` | catch → `"이미 사용된 쿠폰입니다."` ✓ |
+| (c) 분포 2 | TX_B 가 TX_A commit *이후* 시작 | `issue.use()` 의 `canTransitTo(USED)` false → `CoreException(CONFLICT, "현재 상태(USED) 에서 USED 로 전이할 수 없습니다.")` | **catch 안 잡힘 → 도메인 메시지 그대로 노출** ✗ |
+
+→ 사용자 입장에서 *같은 의도 (다중 기기 동시 쿠폰 사용)* 인데 *2 메시지* 응답 — UX 일관성 깨짐 (verify-code §12 정합 깨짐).
+
+### Fix 적용 (commit `6249fcb`)
+
+`ReservationFacade.reserve` 의 try 블록 확장 + `CoreException` catch 분기 추가:
+
+```kotlin
+try {
+    coupon.issue.use(actor = coupon.actorId, reservationId = saved.id, now = now)
+    couponIssueRepository.save(coupon.issue)
+} catch (e: OptimisticLockingFailureException) {
+    throw CoreException(ErrorType.CONFLICT, COUPON_ALREADY_USED_MESSAGE, cause = e)
+} catch (e: DataIntegrityViolationException) {
+    throw CoreException(ErrorType.CONFLICT, COUPON_ALREADY_USED_MESSAGE, cause = e)
+} catch (e: CoreException) {
+    // CONFLICT 만 메시지 일반화. BAD_REQUEST/FORBIDDEN 은 도메인 의미 그대로 전파
+    if (e.errorType == ErrorType.CONFLICT) {
+        throw CoreException(ErrorType.CONFLICT, COUPON_ALREADY_USED_MESSAGE, cause = e)
+    }
+    throw e
+}
+```
+
+`COUPON_ALREADY_USED_MESSAGE = "이미 사용된 쿠폰입니다."` companion const 로 추출 — 3 throw 위치의 메시지를 단일 출처에서 관리 (verify-code §13 매직 상수 정합).
+
+### 회귀 가드 추가 (commit `6249fcb` 같은 묶음)
+
+`ConcurrentCouponUseTest` 의 어설션 강화:
+- `conflictExceptions: MutableList<CoreException>` 별도 수집
+- `assertThat(conflictMessages).containsExactly("이미 사용된 쿠폰입니다.")` — *모든 CONFLICT 응답* 의 customMessage 가 단일 set
+- DisplayName 갱신: `"... + 모든 CONFLICT 응답이 동일 메시지로 일관된다"`
+
+미래 누군가 catch scope 를 줄여도 *어설션이 즉시 실패* → 회귀 가드 발동.
+
+### 채택 결정 — verify-code §0-B 냉정 모드 영구 박제
+
+본 발견을 1회성 fix 로 끝내지 않고 **메타 룰** 로 박제:
+- `.claude/skills/verify-code/SKILL.md` 신규 §0-B 6 체크리스트 (CE-1 ~ CE-6)
+- §12 신규 룰: *Facade try/catch 의 catch scope 가 모든 throw 경로 감쌈*
+- §19-B 신규 룰: *동시성 E2E 어설션이 customMessage 일관성 검증*
+- §22 fast-follow 11 → 13종 확장
+
+### 영구 한계
+- *분포 2 (snapshot 이후 시작)* 가 latch 동기화 환경에서 발동 빈도 낮음 — 어설션이 *분포 1 만* 검증할 가능성. 5주차+ 부하 라운드에서 *사전 commit + Thread.sleep* 으로 분포 2 강제 시나리오 추가 권장.
+
+---
+
+## CE-Result-2. F3 / F4 / F5 — 부수 fix 박제
+
+| Fix | 결함 | commit | 본질 |
+|---|---|---|---|
+| **F3** | `ConcurrentCouponUseTest` 어설션 메시지 일관성 미검증 | `6249fcb` (F1 같은 묶음) | F1 의 회귀 가드 추가 |
+| **F4** | `ConcurrentMultiDateReservationTest` inventory 재조회 중복 | `ee74b13` | 첫 매핑은 `reservedRooms` 만, 두 번째 forEach 가 같은 일자 재조회 — `Map<LocalDate, DailyRoomInventoryModel>` 단일 매핑으로 통합 |
+| **F5** | `WishlistFacade.unwish` KDoc race 시나리오 부분 박제 | `e57e757` | "다른 thread 가 먼저 0 으로 만든 case" 만 박제, "다른 thread 의 wish race" 미박제 — 양 축 박제로 보강 |
+
+---
+
+## 냉정 모드 라운드의 commit 4건 (git-추적)
+
+| # | hash | prefix | 메시지 |
+|---|---|---|---|
+| 1 | `9935440` | `skills` | verify-code 에 §0-B 냉정 모드 (Cold-Eye Mode) 6 체크리스트와 catch scope 정합 / 메시지 일관성 어설션 룰을 추가한다. |
+| 2 | `6249fcb` | `fix` | ReservationFacade 의 try/catch scope 를 issue.use() 까지 확장하고 동시 사용 CONFLICT 응답 메시지를 일관 정규화한다. |
+| 3 | `ee74b13` | `refactor` | ConcurrentMultiDateReservationTest 의 inventory 재조회를 단일 매핑으로 통합한다. |
+| 4 | `e57e757` | `docs` | WishlistFacade.unwish 의 race 시나리오 KDoc 을 양 축 (다른 thread 의 0 진입 / 다른 thread 의 wish) 으로 보강한다. |
+
+## Round 2 자체 회귀 — defect zero
+
+- §13 매직 상수 ✓ (`COUPON_ALREADY_USED_MESSAGE` const 추출)
+- §14 DRY ✓ (3 throw 위치 동일 const)
+- §19-A 운영-테스트 동치 ✓ (Facade 메시지 ↔ test 어설션 1:1)
+- §19-B 문서-동작 정합 ✓ (KDoc 의 *3 흐름 박제* ↔ 실제 try/catch)
+- §0-B CE-1 ~ CE-6 모두 ✓
+- 호출자 영향 0 (시그니처 변경 X)
+
+**최종 검증**: 404 tests / 0 failures / 0 errors, ktlintCheck PASS, ConcurrentCouponUseTest 5.526s (메시지 일관성 어설션 통과).
