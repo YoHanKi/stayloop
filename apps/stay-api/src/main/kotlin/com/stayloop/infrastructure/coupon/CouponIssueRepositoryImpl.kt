@@ -31,7 +31,9 @@ class CouponIssueRepositoryImpl(
     private val queryFactory: JPAQueryFactory,
 ) : CouponIssueRepository {
 
-    override fun save(issue: CouponIssueModel): CouponIssueModel = jpa.save(issue)
+    // saveAndFlush — @Version 충돌이 commit 시점이 아니라 *호출 시점에* OptimisticLockingFailureException 으로
+    // 즉시 throw 되어야 Facade 가 try/catch 로 잡을 수 있다 (도메인 인터페이스 KDoc 의 의미 계약).
+    override fun save(issue: CouponIssueModel): CouponIssueModel = jpa.saveAndFlush(issue)
 
     override fun findById(id: Long): CouponIssueModel? = jpa.findById(id).orElse(null)
 

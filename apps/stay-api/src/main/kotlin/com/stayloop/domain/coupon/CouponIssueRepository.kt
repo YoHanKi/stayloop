@@ -22,6 +22,12 @@ import com.stayloop.domain.user.value.LoginId
 interface CouponIssueRepository {
     /**
      * 신규 발급 또는 사용 상태 갱신 (use → USED).
+     *
+     * **운영 구현은 `saveAndFlush` 의미** — `@Version` 낙관적 락 충돌이 *commit 시점이 아니라 호출 시점에*
+     * `OptimisticLockingFailureException` 으로 즉시 throw 되어야 Facade 가 try/catch 로 잡고 도메인 메시지
+     * (`"이미 사용된 쿠폰입니다."`) 로 변환할 수 있다 (`docs/plan/week4.md` ③ Phase B-2). 운영 RepositoryImpl 의
+     * `jpa.saveAndFlush` 가 이 의미를 보장 — 불필요한 추가 round-trip 비용은 *쿠폰 사용 흐름이 빈번하지 않아*
+     * 감수 가능. InMemory 더블은 `synchronized` 단순 저장 (낙관적 락 의미론 비재현 — verify-code R9 정합).
      */
     fun save(issue: CouponIssueModel): CouponIssueModel
 

@@ -19,7 +19,7 @@ class CouponIssueModelTest {
     private fun newIssue(): CouponIssueModel =
         CouponIssueModel.issue(templateId = 1L, userId = ownerId, issuedAt = issuedAt)
 
-    @DisplayName("발급 시 status = AVAILABLE, usedAt / usedReservationId 는 null.")
+    @DisplayName("발급 시 status = AVAILABLE, usedAt / usedReservationId 는 null, version 은 0 으로 시작.")
     @Test
     fun shouldStartAsAvailable() {
         val issue = newIssue()
@@ -30,6 +30,8 @@ class CouponIssueModelTest {
         assertThat(issue.issuedAt).isEqualTo(issuedAt)
         assertThat(issue.userId).isEqualTo(ownerId)
         assertThat(issue.templateId).isEqualTo(1L)
+        // 낙관적 락 초기 version — JPA 가 첫 INSERT 후 1 로 증가시키지만, 도메인 신규 인스턴스는 0 에서 시작
+        assertThat(issue.version).isZero()
     }
 
     @DisplayName("templateId 가 0 이하면 BAD_REQUEST 로 거절된다.")

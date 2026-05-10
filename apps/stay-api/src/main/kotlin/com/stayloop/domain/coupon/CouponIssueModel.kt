@@ -10,6 +10,7 @@ import jakarta.persistence.EnumType
 import jakarta.persistence.Enumerated
 import jakarta.persistence.Table
 import jakarta.persistence.UniqueConstraint
+import jakarta.persistence.Version
 import java.time.LocalDateTime
 
 /**
@@ -38,6 +39,16 @@ import java.time.LocalDateTime
  *
  * **`requireOwner` 는 *마지막 방어선* — 정상 흐름에서는 Facade 가 사전에 본인 소유 검증 (BAD_REQUEST 메시지
  * 일반화) 하므로 도달하지 않지만, 외부 진입점 / 미래 다른 호출자가 가드를 빠뜨려도 도메인이 자기 자신을 지킨다.**
+ *
+ * **동시성 — `@Version` 낙관적 락 + DB UNIQUE 다층 가드** (`docs/plan/week4.md` ③ Phase B, decision.md D-1 #2)
+ * - **`@Version` (`Long`)** — 동일 row 의 동시 UPDATE 를 잡는다. 같은 사용자가 다중 기기에서 같은 쿠폰을 동시
+ *   사용 시도하면 *한 commit 만 성공*, 나머지는 `OptimisticLockingFailureException` 으로 거절. 처리량이 핵심
+ *   인 자원이 아니므로 retry 비용보다 *충돌 즉시 사용자 안내* 가 자연스럽다 (CONFLICT 응답).
+ * - **DB UNIQUE (`used_reservation_id`)** — 서로 다른 reservation 에 같은 쿠폰을 동시 사용 시도를 잡는다.
+ *   `@Version` 만으로 충분한 시나리오지만, 애플리케이션 우회 (관리 도구 / 마이그레이션 / 미래의 다른 진입점)
+ *   에도 살아남는 *DB 레벨 가드* — defense in depth.
+ * - **`Long` 채택 근거** — 단조 증가 + 운영 디버깅 용이성 (Phase 0 E-3 / Round 1 E-3-r1 박제). Timestamp 는
+ *   동일 ms 안 false negative 위험 + 분산 노드 시계 불일치 위험.
  */
 @Entity
 @Table(
@@ -78,6 +89,17 @@ class CouponIssueModel internal constructor(
 
     @Column(name = "used_reservation_id", nullable = true)
     var usedReservationId: Long? = null
+        protected set
+
+    /**
+     * 낙관적 락 버전. Hibernate `@Version` 의미론 — *INSERT 시 0 유지*, *각 UPDATE 시 1 증가*. JPA 가 UPDATE 시
+     * `WHERE version = ?` 자동 부착 — 동일 row 의 동시 UPDATE 시 stale version 을 만난 두 번째 commit 은
+     * `OptimisticLockingFailureException` 으로 실패. `Long` 단조 증가 — false negative (충돌 미감지) 0 보장
+     * (Timestamp 와의 비교: Phase 0 E-3 박제).
+     */
+    @Version
+    @Column(name = "version", nullable = false)
+    var version: Long = 0
         protected set
 
     init {
