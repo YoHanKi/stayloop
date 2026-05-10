@@ -142,7 +142,10 @@ class ConcurrentCouponUseTest {
         databaseCleanUp.truncateAllTables()
     }
 
-    @DisplayName("같은 사용자 / 같은 쿠폰 × 5 스레드 동시 reserve 시 — 정확히 1건만 성공하고 쿠폰은 1회만 사용된다.")
+    @DisplayName(
+        "같은 사용자 / 같은 쿠폰 × 5 스레드 동시 reserve 시 — 정확히 1건만 성공하고 쿠폰은 1회만 사용되며 " +
+            "모든 CONFLICT 응답이 동일 메시지 (\"이미 사용된 쿠폰입니다.\") 로 일관된다.",
+    )
     @Test
     fun shouldUseCouponExactlyOnce_whenFiveThreadsCompeteWithSameCoupon() {
         // given — 사용자 1명, 쿠폰 1장 (AVAILABLE), 5개의 비-겹침 일자 + 각 일자 가용 10실
@@ -159,9 +162,10 @@ class ConcurrentCouponUseTest {
         val start = CountDownLatch(1)
         val done = CountDownLatch(threadCount)
         val successes = AtomicInteger(0)
-        val conflicts = AtomicInteger(0)
         val others = AtomicInteger(0)
         val failures: MutableList<Throwable> = java.util.Collections.synchronizedList(mutableListOf())
+        // CONFLICT 로 분류된 예외만 별도 수집 — 메시지 일관성 검증용 (verify-code §0-B CE-3 / §19-B).
+        val conflictExceptions: MutableList<CoreException> = java.util.Collections.synchronizedList(mutableListOf())
 
         // when — 5 스레드가 같은 couponId 로 *서로 다른 일자* 의 reserve 를 동시 호출
         periods.forEachIndexed { i, period ->
@@ -183,7 +187,7 @@ class ConcurrentCouponUseTest {
                     successes.incrementAndGet()
                 } catch (e: CoreException) {
                     if (e.errorType == ErrorType.CONFLICT) {
-                        conflicts.incrementAndGet()
+                        conflictExceptions.add(e)
                     } else {
                         others.incrementAndGet()
                         failures.add(e)
@@ -204,21 +208,33 @@ class ConcurrentCouponUseTest {
         check(done.await(30, TimeUnit.SECONDS)) { "동시 쿠폰 사용 흐름이 30초 안에 완료되지 않았습니다." }
         executor.shutdown()
 
-        // then — 성공 1건 + 실패 4건 모두 CONFLICT 로 일반화
+        // then — 성공 1건 + 실패 4건 모두 CONFLICT 로 일반화 + 메시지 일관성
         val sample = failures.take(3).joinToString("\n  ") { "${it::class.simpleName}: ${it.message}" }
+        val conflictCount = conflictExceptions.size
         assertThat(successes.get())
             .withFailMessage(
                 "성공=%d, conflict=%d, others=%d. 첫 실패 샘플:\n  %s",
                 successes.get(),
-                conflicts.get(),
+                conflictCount,
                 others.get(),
                 sample,
             )
             .isEqualTo(1)
-        assertThat(conflicts.get()).isEqualTo(threadCount - 1)
+        assertThat(conflictCount).isEqualTo(threadCount - 1)
         assertThat(others.get())
             .withFailMessage("CONFLICT 외 raw 예외 발생: others=%d, sample:\n  %s", others.get(), sample)
             .isZero()
+        // **메시지 일관성 회귀 가드** (verify-code §0-B CE-3 / §19-B) — 같은 도메인 사고가 *3 흐름*
+        // (낙관적 락 / UNIQUE / 도메인 throw) 으로 발생할 수 있어 Facade 가 *동일 customMessage* 로 정규화한다.
+        // catch 한 모든 CONFLICT 의 customMessage 가 단일 set 으로 모이는지 검증 — 한 흐름이라도 다른
+        // 메시지가 새어나오면 UX 일관성 깨짐.
+        val conflictMessages = conflictExceptions.mapNotNull { it.customMessage }.toSet()
+        assertThat(conflictMessages)
+            .withFailMessage(
+                "CONFLICT 메시지 일관성 깨짐: %s (catch scope 정합 위반 — verify-code §0-B CE-1)",
+                conflictMessages,
+            )
+            .containsExactly("이미 사용된 쿠폰입니다.")
 
         // DB 의 쿠폰 사용 박제 — status=USED, used_reservation_id 가 정확히 1건 (UNIQUE 제약 동작 확인)
         val finalIssue = couponIssues.findById(couponId)

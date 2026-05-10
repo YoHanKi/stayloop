@@ -139,20 +139,31 @@ class ReservationFacade(
         val saved = reservationRepository.save(reservation)
 
         // 예약 저장으로 reservation.id 가 부여된 *후* 쿠폰 사용 처리 (CouponIssueService KDoc 의 시간 분리).
-        // **동시성 변환** (`docs/plan/week4.md` ③ Phase B-2) — `@Version` 낙관적 락 충돌 또는
-        // `used_reservation_id` UNIQUE 제약 위반은 모두 *같은 의미* (이미 사용된 쿠폰의 동시 사용) 이므로
-        // CONFLICT 로 일반화. 식별자 (couponId / userId / reservationId) 는 메시지에 노출하지 않는다
-        // (verify-code §12). JPA 예외는 `cause` 로 보존되어 서버 로그에서만 추적 (ApiControllerAdvice 가
-        // CoreException → 409 변환).
+        // **동시성 변환** (`docs/plan/week4.md` ③ Phase B-2, verify-code §0-B CE-1 catch scope 정합) —
+        // 같은 도메인 사고 (이미 사용된 쿠폰의 동시 사용) 가 REPEATABLE_READ snapshot 분포에 따라 *3 흐름*
+        // 으로 발생 가능: (a) 분포 1 — snapshot 이전 시작: `issue.use()` 메모리 검증 통과 → `saveAndFlush`
+        // 시점에 stale version → `OptimisticLockingFailureException`. (b) `used_reservation_id` UNIQUE
+        // 위반 → `DataIntegrityViolationException`. (c) 분포 2 — snapshot 이후 시작: `issue.use()` 의
+        // `canTransitTo(USED)` false → `CoreException(CONFLICT, "현재 상태(USED)...")` 도메인 throw.
+        // **세 흐름 모두 try 안에 두고 *동일 메시지* `"이미 사용된 쿠폰입니다."` 로 정규화** — 클라이언트
+        // 응답 일관성. 식별자 노출 0 (verify-code §12). cause 로 운영 로그에서만 분기 정보 추적.
         if (coupon != null) {
-            coupon.issue.use(actor = coupon.actorId, reservationId = saved.id, now = now)
             try {
+                coupon.issue.use(actor = coupon.actorId, reservationId = saved.id, now = now)
                 couponIssueRepository.save(coupon.issue)
             } catch (e: OptimisticLockingFailureException) {
-                throw CoreException(ErrorType.CONFLICT, "이미 사용된 쿠폰입니다.", cause = e)
+                throw CoreException(ErrorType.CONFLICT, COUPON_ALREADY_USED_MESSAGE, cause = e)
             } catch (e: DataIntegrityViolationException) {
                 // used_reservation_id UNIQUE 위반 — 다른 reservation 에 이미 사용 중인 쿠폰
-                throw CoreException(ErrorType.CONFLICT, "이미 사용된 쿠폰입니다.", cause = e)
+                throw CoreException(ErrorType.CONFLICT, COUPON_ALREADY_USED_MESSAGE, cause = e)
+            } catch (e: CoreException) {
+                // `issue.use()` 의 도메인 throw — CONFLICT (canTransitTo 실패) 만 메시지 일반화.
+                // BAD_REQUEST (reservationId <= 0) / FORBIDDEN (requireOwner 마지막 방어선) 은 도메인
+                // 의미 그대로 전파 — 정상 흐름에서는 사전 검증으로 도달하지 않으므로 발동 시 *진짜 사고*.
+                if (e.errorType == ErrorType.CONFLICT) {
+                    throw CoreException(ErrorType.CONFLICT, COUPON_ALREADY_USED_MESSAGE, cause = e)
+                }
+                throw e
             }
         }
 
@@ -270,5 +281,11 @@ class ReservationFacade(
         if (reservation.userId != loginId) {
             throw CoreException(ErrorType.FORBIDDEN, "본인 예약만 ${action}할 수 있습니다.")
         }
+    }
+
+    companion object {
+        // 같은 도메인 사고 (이미 사용된 쿠폰의 동시 사용) 가 *3 흐름* (낙관적 락 / UNIQUE / 도메인 throw) 으로
+        // 발생할 수 있어 *동일 메시지* 로 정규화 — verify-code §0-B CE-1 / §12 catch scope 정합.
+        private const val COUPON_ALREADY_USED_MESSAGE = "이미 사용된 쿠폰입니다."
     }
 }
