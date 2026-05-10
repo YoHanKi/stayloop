@@ -11,7 +11,10 @@ import com.stayloop.domain.user.value.LoginId
  * - 테스트 — `support/test/InMemoryCouponIssueRepository` (운영과 동일 의미론)
  *
  * **boundary 는 `LoginId`** — Facade / 도메인 서비스가 `LoginId` 를 들고 다닐 수 있도록 시그니처에 명시.
- * Issue 자체가 `userId: LoginId` 를 보존하므로 Wishlist 와 달리 BIGINT 변환은 필요 없다.
+ * 단, `CouponIssueModel.userId` 자체는 `users.id` (BIGINT `Long`) 로 영속화되므로 운영 RepositoryImpl 과
+ * InMemory 더블은 *모두* `LoginId → users.id` 변환 (`UserRepository.findByLoginId(...)?.id`) 을 수행한다 —
+ * Wishlist 와 동일한 boundary 변환 패턴이며, "변환 필요 없음" 이 아니라 *변환 책임을 Repository 구현체로 위임*
+ * 한다는 의미. (verify-code §19-B (1) — Repository KDoc 의 boundary 타입 / 변환 책임 클레임 정합.)
  *
  * **`findByUserId(userId, page)` 정렬** — `issuedAt DESC, id DESC` 고정 (최근 발급순 + tie-breaker).
  * `page.sort` 가 비어있지 않으면 BAD_REQUEST 거절 (Wishlist 와 동일 정책 — verify-code §16-A silent ignore 차단).
