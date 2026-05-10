@@ -18,4 +18,12 @@ data class ReserveCommand(
     val period: StayPeriod,
     val guestCount: Int,
     val guest: GuestInfo,
+    /**
+     * 적용할 쿠폰의 발급 인스턴스 id. **null = 쿠폰 미적용** (`docs/plan/week4.md` ② Commit 3,
+     * `docs/plan/week4/decision.md` D-3 / D-4).
+     *
+     * 본인 자원 인가 (`couponIssue.userId == this.userId`) / 만료 / 사용 여부 검증은 모두 `ReservationFacade.reserve`
+     * 의 책임 — Command 자체는 *원시 입력 박제* 위치.
+     */
+    val couponId: Long? = null,
 )

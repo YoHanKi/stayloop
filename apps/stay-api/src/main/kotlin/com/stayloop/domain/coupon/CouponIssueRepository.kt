@@ -1,0 +1,58 @@
+package com.stayloop.domain.coupon
+
+import com.stayloop.domain.common.value.PageQuery
+import com.stayloop.domain.user.value.LoginId
+
+/**
+ * `CouponIssue` 의 도메인 Repository 인터페이스. (`docs/plan/week4.md` ① Phase A-4)
+ *
+ * 구현체:
+ * - 운영 — `infrastructure/coupon/CouponIssueRepositoryImpl` (A-5 시점, QueryDSL 위임)
+ * - 테스트 — `support/test/InMemoryCouponIssueRepository` (운영과 동일 의미론)
+ *
+ * **boundary 는 `LoginId`** — Facade / 도메인 서비스가 `LoginId` 를 들고 다닐 수 있도록 시그니처에 명시.
+ * 단, `CouponIssueModel.userId` 자체는 `users.id` (BIGINT `Long`) 로 영속화되므로 운영 RepositoryImpl 과
+ * InMemory 더블은 *모두* `LoginId → users.id` 변환 (`UserRepository.findByLoginId(...)?.id`) 을 수행한다 —
+ * Wishlist 와 동일한 boundary 변환 패턴이며, "변환 필요 없음" 이 아니라 *변환 책임을 Repository 구현체로 위임*
+ * 한다는 의미. (verify-code §19-B (1) — Repository KDoc 의 boundary 타입 / 변환 책임 클레임 정합.)
+ *
+ * **`findByUserId(userId, page)` 정렬** — `issuedAt DESC, id DESC` 고정 (최근 발급순 + tie-breaker).
+ * `page.sort` 가 비어있지 않으면 BAD_REQUEST 거절 (Wishlist 와 동일 정책 — verify-code §16-A silent ignore 차단).
+ *
+ * 본 라운드 메서드 범위는 *대고객 발급 / 사용 / 목록 조회* 까지. *어드민 발급 이력 페이지네이션* / *코드 입력
+ * 발급 (`findByCodeAndUserId`)* 은 후속 phase 합류 시점에 추가한다 (YAGNI).
+ */
+interface CouponIssueRepository {
+    /**
+     * 신규 발급 또는 사용 상태 갱신 (use → USED).
+     *
+     * **운영 구현은 `saveAndFlush` 의미** — `@Version` 낙관적 락 충돌이 *commit 시점이 아니라 호출 시점에*
+     * `OptimisticLockingFailureException` 으로 즉시 throw 되어야 Facade 가 try/catch 로 잡고 도메인 메시지
+     * (`"이미 사용된 쿠폰입니다."`) 로 변환할 수 있다 (`docs/plan/week4.md` ③ Phase B-2). 운영 RepositoryImpl 의
+     * `jpa.saveAndFlush` 가 이 의미를 보장 — 불필요한 추가 round-trip 비용은 *쿠폰 사용 흐름이 빈번하지 않아*
+     * 감수 가능. InMemory 더블은 `synchronized` 단순 저장 (낙관적 락 의미론 비재현 — verify-code R9 정합).
+     */
+    fun save(issue: CouponIssueModel): CouponIssueModel
+
+    /**
+     * `id` 단건 조회. 없으면 null.
+     */
+    fun findById(id: Long): CouponIssueModel?
+
+    /**
+     * 사용자의 발급 이력을 페이지 단위로 조회 — 정렬은 `issuedAt DESC, id DESC` 고정.
+     * `page.sort` 가 비어있지 않으면 BAD_REQUEST.
+     */
+    fun findByUserId(userId: LoginId, page: PageQuery): List<CouponIssueModel>
+
+    /**
+     * 어드민 — 특정 템플릿의 발급 이력. `issuedAt DESC, id DESC` 고정 정렬.
+     * `page.sort` 비어있지 않으면 BAD_REQUEST.
+     */
+    fun findByTemplateId(templateId: Long, page: PageQuery): List<CouponIssueModel>
+
+    /**
+     * 어드민 — 특정 템플릿에 대한 발급 이력 존재 여부. delete 가드용.
+     */
+    fun existsByTemplateId(templateId: Long): Boolean
+}

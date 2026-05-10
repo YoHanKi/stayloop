@@ -50,6 +50,66 @@ class InMemoryDailyRoomInventoryRepositoryTest {
         assertThat(result[0].roomTypeId).isEqualTo(1L)
     }
 
+    @DisplayName("findInventoriesForUpdate 는 인자 순서와 무관하게 항상 date ASC 로 정렬해 반환한다 — 다일자 락 순서 정합.")
+    @Test
+    fun shouldReturnSortedByDateAsc_regardlessOfInputOrder() {
+        repository.saveAll(
+            listOf(
+                DailyRoomInventoryModel.create(roomTypeId, LocalDate.of(2026, 5, 10), totalRooms = 5),
+                DailyRoomInventoryModel.create(roomTypeId, LocalDate.of(2026, 5, 11), totalRooms = 5),
+                DailyRoomInventoryModel.create(roomTypeId, LocalDate.of(2026, 5, 12), totalRooms = 5),
+            ),
+        )
+
+        val result = repository.findInventoriesForUpdate(
+            roomTypeId,
+            // 일부러 역순 입력 — 구현이 입력 순서를 그대로 따르면 데드락 회피 정렬 가드가 깨진다.
+            listOf(LocalDate.of(2026, 5, 12), LocalDate.of(2026, 5, 10), LocalDate.of(2026, 5, 11)),
+        )
+
+        assertThat(result).extracting("date")
+            .containsExactly(
+                LocalDate.of(2026, 5, 10),
+                LocalDate.of(2026, 5, 11),
+                LocalDate.of(2026, 5, 12),
+            )
+    }
+
+    @DisplayName("findInventoriesForUpdate 는 dates 가 비어있으면 빈 리스트를 반환한다 (no-op).")
+    @Test
+    fun shouldReturnEmpty_whenDatesEmpty() {
+        repository.save(DailyRoomInventoryModel.create(roomTypeId, LocalDate.of(2026, 5, 10), totalRooms = 5))
+
+        assertThat(repository.findInventoriesForUpdate(roomTypeId, emptyList())).isEmpty()
+    }
+
+    @DisplayName("findInventoriesForUpdate 는 누락된 일자를 결과에 포함시키지 않는다 (호출자가 BAD_REQUEST 처리).")
+    @Test
+    fun shouldNotIncludeMissingDates() {
+        repository.save(DailyRoomInventoryModel.create(roomTypeId, LocalDate.of(2026, 5, 10), totalRooms = 5))
+
+        val result = repository.findInventoriesForUpdate(
+            roomTypeId,
+            listOf(LocalDate.of(2026, 5, 10), LocalDate.of(2026, 5, 11)),
+        )
+
+        assertThat(result).hasSize(1)
+        assertThat(result[0].date).isEqualTo(LocalDate.of(2026, 5, 10))
+    }
+
+    @DisplayName("findInventoriesForUpdate 는 다른 roomTypeId 의 행을 섞지 않는다.")
+    @Test
+    fun shouldFilterByRoomTypeId_inFindInventoriesForUpdate() {
+        val date = LocalDate.of(2026, 5, 10)
+        repository.save(DailyRoomInventoryModel.create(roomTypeId = 1L, date = date, totalRooms = 5))
+        repository.save(DailyRoomInventoryModel.create(roomTypeId = 2L, date = date, totalRooms = 5))
+
+        val result = repository.findInventoriesForUpdate(roomTypeId = 1L, dates = listOf(date))
+
+        assertThat(result).hasSize(1)
+        assertThat(result[0].roomTypeId).isEqualTo(1L)
+    }
+
     @DisplayName("save 는 같은 자연키에 대해 upsert 동작 — 같은 (roomTypeId, date) 은 한 행만.")
     @Test
     fun shouldUpsertOnSameNaturalKey() {

@@ -14,4 +14,9 @@ class UserRepositoryImpl(
     override fun findByLoginId(loginId: LoginId): UserModel? = userJpaRepository.findByLoginId(loginId)
 
     override fun existsByLoginId(loginId: LoginId): Boolean = userJpaRepository.existsByLoginId(loginId)
+
+    override fun findAllByIds(ids: Collection<Long>): List<UserModel> {
+        if (ids.isEmpty()) return emptyList()
+        return userJpaRepository.findAllById(ids).toList()
+    }
 }

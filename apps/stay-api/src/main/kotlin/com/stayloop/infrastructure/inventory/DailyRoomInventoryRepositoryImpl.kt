@@ -5,6 +5,7 @@ import com.stayloop.domain.inventory.DailyRoomInventoryId
 import com.stayloop.domain.inventory.DailyRoomInventoryModel
 import com.stayloop.domain.inventory.DailyRoomInventoryRepository
 import com.stayloop.domain.inventory.QDailyRoomInventoryModel
+import jakarta.persistence.LockModeType
 import org.springframework.stereotype.Component
 import java.time.LocalDate
 
@@ -17,6 +18,11 @@ import java.time.LocalDate
  * **`findAllInRange` 는 QueryDSL** — 반-닫힌 구간 `[from, to)` (`Between` 양 끝 포함과 다름) 와 `date ASC` 정렬을
  * type-safe 경로로 표현. 다일자 락 순서 (`docs/plan/week4.md` ③ Phase A) 와 정합 (verify-code §19-B —
  * 문서 ↔ 가드 정합).
+ *
+ * **`findInventoriesForUpdate` 는 QueryDSL `setLockMode(PESSIMISTIC_WRITE)`** —
+ * 도메인 Repository 가 `@Lock` / `@QueryHints` 같은 Spring Data 어노테이션을 의식하지 않도록
+ * 인프라 어댑터에서 락 모드를 일원화. `*JpaRepository` 인터페이스는 `JpaRepository<T, ID>`
+ * 만 상속하는 정책 (`.github/instructions/repository.instructions.md`, `decision.md` D-6) 정합.
  */
 @Component
 class DailyRoomInventoryRepositoryImpl(
@@ -40,6 +46,23 @@ class DailyRoomInventoryRepositoryImpl(
                 d.date.lt(to),
             )
             .orderBy(d.date.asc())
+            .fetch()
+    }
+
+    override fun findInventoriesForUpdate(
+        roomTypeId: Long,
+        dates: List<LocalDate>,
+    ): List<DailyRoomInventoryModel> {
+        if (dates.isEmpty()) return emptyList()
+        val d = QDailyRoomInventoryModel.dailyRoomInventoryModel
+        return queryFactory
+            .selectFrom(d)
+            .where(
+                d.roomTypeId.eq(roomTypeId),
+                d.date.`in`(dates),
+            )
+            .orderBy(d.date.asc())
+            .setLockMode(LockModeType.PESSIMISTIC_WRITE)
             .fetch()
     }
 

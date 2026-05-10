@@ -48,8 +48,6 @@ out/
 ### claude settings ###
 *.local.json
 
-exp*
-
 docs/
 
 ### per-feature PR drafts (로컬 작성용, 깃 추적 X) ###

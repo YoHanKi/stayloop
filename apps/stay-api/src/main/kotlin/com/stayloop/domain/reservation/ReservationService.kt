@@ -1,8 +1,11 @@
 package com.stayloop.domain.reservation
 
+import com.stayloop.domain.common.value.Money
+import com.stayloop.domain.coupon.value.Discount
 import com.stayloop.domain.inventory.DailyRoomInventoryModel
 import com.stayloop.domain.rate.DailyRoomRateModel
 import com.stayloop.domain.rate.ReservationPriceCalculator
+import com.stayloop.domain.reservation.value.CouponSnapshot
 import com.stayloop.domain.reservation.value.GuestInfo
 import com.stayloop.domain.reservation.value.PropertySnapshot
 import com.stayloop.domain.reservation.value.RoomTypeSnapshot
@@ -61,6 +64,8 @@ class ReservationService(
         guest: GuestInfo,
         inventories: List<DailyRoomInventoryModel>,
         rates: List<DailyRoomRateModel>,
+        discount: Discount? = null,
+        couponSnapshot: CouponSnapshot? = null,
     ): Pair<List<DailyRoomInventoryModel>, ReservationModel> {
         // 1. 인원 검증 (AC-5) — cheap input 은 부수효과 이전에 끝낸다 (verify-code §6)
         if (guestCount <= 0) {
@@ -96,12 +101,22 @@ class ReservationService(
             expectedDates = expectedDates,
         )
 
+        // 2-A. discount ↔ couponSnapshot 일관성 — 둘 다 null 또는 둘 다 non-null (silent 사고 차단)
+        if ((discount == null) != (couponSnapshot == null)) {
+            throw CoreException(
+                ErrorType.BAD_REQUEST,
+                "discount 와 couponSnapshot 은 함께 null 또는 함께 non-null 이어야 합니다.",
+            )
+        }
+
         // 3. 재고 차감 — DailyRoomInventoryModel.reserveOne() 가 가용 0 일 때 CONFLICT 로 자체 거절
         // 도중 throw 시 Facade 의 @Transactional 이 롤백 (AC-4)
         inventories.forEach { it.reserveOne() }
 
-        // 4. 요금 합산
-        val total = priceCalculator.totalPrice(rates)
+        // 4. 요금 합산 — discount 가 주어지면 calculator 가 합산 ↔ discount.beforeDiscount 정합 검증 후 finalPrice 반환
+        val total = priceCalculator.totalPrice(rates, discount)
+        val priceBefore: Money = discount?.beforeDiscount ?: total
+        val discountAmount: Money = discount?.amount ?: Money.ZERO
 
         // 5. Reservation 생성 (PENDING)
         val reservation = ReservationModel.create(
@@ -112,6 +127,9 @@ class ReservationService(
             guestCount = guestCount,
             guest = guest,
             totalPrice = total,
+            priceBeforeDiscount = priceBefore,
+            discountAmount = discountAmount,
+            couponSnapshot = couponSnapshot,
         )
 
         return inventories to reservation

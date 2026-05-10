@@ -24,4 +24,7 @@ dependencies {
     // test-fixtures
     testImplementation(testFixtures(project(":modules:jpa")))
     testImplementation(testFixtures(project(":modules:redis")))
+
+    // testcontainers — 동시성 E2E + experiment 일회성 측정에 사용 (gitignored experiment/ 디렉토리 정합)
+    testImplementation("org.testcontainers:mysql")
 }

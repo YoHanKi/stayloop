@@ -6,10 +6,11 @@ description: |
   외부 라이브러리 누출, 컬렉션 정렬 결정성, 캐시-원본 불일치, 입력 검증 누락, 멱등 깨짐, 사일런트 디폴트,
   동시성 사고, 자원 누수, 시간/Clock 의존, 예외 삼킴, 매직 상수, 코드 중복, 가시성 이탈,
   성능 함정(N+1/eager), 보안(시크릿 노출/주입) — 을 점검한다.
-  기본은 **검증자 모드** — 코드를 새로 작성하거나 리팩토링하지 않으며, 결함을 드러내고 개선 선택지를 제시한다.
+  기본은 **검증자 모드 + 냉정 모드 (§0-B)** — 코드를 새로 작성하거나 리팩토링하지 않으며, 결함을 드러내고 개선 선택지를 제시한다.
+  냉정 모드는 *항상* 활성 — 표면 grep 으로 끝내지 않고 race window / 분포 시나리오 / 어설션 강도 / 다중 throw 경로까지 추론한다.
   사용자가 "회귀 모드 / 자체 반복 / 스탑할 때까지" 를 명시한 경우에 한해 **수정자 모드 + 자체 회귀 루프** 로 전환되어,
   Round N 검증 → fix → Round N+1 자체 회귀를 defect-zero 도달까지 반복한다 (§0-A 회귀 모드 절차).
-  검증 룰의 두 축: **본 스킬의 §1~§19-B + `.github/instructions/*.md` (Copilot 동일 기준)** — 두 축 모두 통과해야 PASS.
+  검증 룰의 두 축: **본 스킬의 §0-B 냉정 모드 체크리스트 + §1~§19-B + `.github/instructions/*.md` (Copilot 동일 기준)** — 모두 통과해야 PASS.
   자동 호출 순서: **verify-code → verify-architecture → verify-tests**.
   본 스킬이 FAIL 인 동안 verify-architecture / verify-tests 는 의미가 없다 — 코드 본문에 사일런트 사고가 남기 때문.
 user-invocable: true
@@ -29,6 +30,105 @@ Stayloop 의 기능 구현/리팩토링은 **이 스킬을 통과한 뒤에야 v
 
 > **수정자 모드 vs 검증자 모드.** 사용자가 명시적으로 "직접 고쳐줘 / 회귀로 돌려줘" 라고 지시한 경우에 한해
 > 본 스킬은 **수정자 모드** 로 전환되어 fix 까지 직접 적용한다. 그 외에는 검증자 관점 — 위반만 적시한다.
+
+---
+
+### 0️⃣-B 냉정 모드 (Cold-Eye Mode) — 기본 검증의 *깊이* 강제
+
+**언제 냉정 모드인가**: 본 스킬은 *항상* 냉정 모드로 동작한다. 사용자가 *"꼼꼼하게 / 냉정하게 / 더 깊게"* 를 명시했거나 변경이 *동시성 / 트랜잭션 / 예외 흐름* 영역이면 본 절차를 *명시적으로 따른다*. **표면 grep 으로 끝내지 않는다** — race window / 분포 시나리오 / 어설션 강도 / 다중 throw 경로까지 추론한다.
+
+**냉정 점검 체크리스트** (검증 라운드마다 *반드시* 통과해야 할 6 항목):
+
+#### CE-1. *try/catch 의 catch scope 정합* — Facade 가 흡수해야 할 *모든 throw 위치* 가 try 안에 있는가
+
+Facade 가 `try { repo.save(...) } catch (e: JpaException) { throw CoreException(...) }` 패턴을 쓸 때, **try 블록 *밖* 에서 같은 도메인 사고의 *다른 throw 경로* 가 있는지** 추론한다.
+
+| 패턴 | 의심 |
+|---|---|
+| Facade 가 `try { repo.save(model) } catch (...)` 만 감싸는데 `model.someMethod()` 가 그 위에서 throw 가능 | model.someMethod() 의 도메인 throw 가 *catch 밖* 으로 흘러 *다른 메시지* 로 응답 |
+| 하나의 도메인 사고 (예: "이미 사용된 쿠폰") 가 *2 흐름* (REPEATABLE_READ snapshot 분포) 으로 발생 가능 | 흐름 1 = JPA 예외 (catch 됨, 일반화 메시지), 흐름 2 = 도메인 메서드 throw (catch 안 됨, 다른 메시지) → 클라이언트 응답 일관성 깨짐 |
+| `try` 안에 *Repository 호출만* 있고 *도메인 메서드* 는 밖 | 도메인 메서드의 `CoreException` 이 `customMessage` 로 직행 (§12 메시지 노출 정합 깨짐) |
+
+**가드**: try 블록은 *그 도메인 사고가 발생할 수 있는 모든 호출* 을 감싼다. `CoreException` 도 catch 후 *errorType 별 분기* 로 메시지 정규화 — 같은 errorType 은 같은 메시지로.
+
+```kotlin
+// ✗ 안 좋음 — use() throw 가 catch 밖
+issue.use(...)
+try { repo.save(issue) } catch (e: OptimisticLockingFailureException) { throw CoreException(CONFLICT, "이미 사용된 쿠폰입니다.", cause = e) }
+
+// ✓ 좋음 — use() 도 try 안 + CoreException CONFLICT 도 catch 후 메시지 정규화
+try {
+    issue.use(...)
+    repo.save(issue)
+} catch (e: OptimisticLockingFailureException) { throw CoreException(CONFLICT, "이미 사용된 쿠폰입니다.", cause = e) }
+catch (e: DataIntegrityViolationException) { throw CoreException(CONFLICT, "이미 사용된 쿠폰입니다.", cause = e) }
+catch (e: CoreException) {
+    if (e.errorType == ErrorType.CONFLICT) throw CoreException(CONFLICT, "이미 사용된 쿠폰입니다.", cause = e)
+    throw e  // BAD_REQUEST / FORBIDDEN 등은 도메인 의미 그대로 전파
+}
+```
+
+**점검 명령**:
+```
+Grep "try \{" path=apps/.../application glob="*Facade.kt"
+→ 각 try 블록 내 *모든 호출* 추출 후, *그 위 라인* 에서 같은 도메인 자원에 대한 mutation/검증 호출이 있는지 확인
+→ 그 호출이 throw 가능 (도메인 메서드 / 검증 가드) 인지 시그니처 추적
+```
+
+#### CE-2. *분포 시나리오 추론* — REPEATABLE_READ snapshot / commit 시점 분포로 *같은 사고* 가 *서로 다른 경로* 발생 가능한가
+
+동시성 자원에 대한 트랜잭션 흐름을 보면, **TX 시작 시점 vs 다른 thread 의 commit 시점** 분포에 따라 *같은 의도의 요청* 이 *다른 throw 경로* 로 갈린다.
+
+| 시나리오 | 분포 1 | 분포 2 |
+|---|---|---|
+| 다중 thread 의 같은 자원 갱신 | TX_B 가 TX_A commit 이전 시작 → snapshot 에 *변경 전 상태* 보임 → memory 검증 통과 → commit 시점에 stale version → JPA 예외 | TX_B 가 TX_A commit 이후 시작 → snapshot 에 *변경 후 상태* 보임 → memory 검증 *실패* → 도메인 throw |
+
+**가드**: 동시성 코드의 try/catch 는 *두 분포 모두 같은 메시지* 를 응답하도록 설계. ConcurrentXxxTest 는 *deterministic latch* 라 분포 1 에 치우치는 경향이 있으므로 *분포 2 가 발동되는 시나리오* 도 의식적 추가 (예: `Thread.sleep` + 사전 commit 으로 분포 2 강제).
+
+#### CE-3. *어설션 강도* — DisplayName 의 모든 동사·정책 단어가 *어설션* 으로 1:1 검증되는가
+
+§19-B 의 확장 — 동시성 E2E 어설션은 *상태 정합* (성공 카운트, DB 값) 만 보고 *메시지 일관성* 을 미검증하는 패턴이 흔하다.
+
+| DisplayName 단어 | 필요 어설션 |
+|---|---|
+| "정확히 N건 성공" | `assertThat(successes).isEqualTo(N)` ✓ |
+| "M건 CONFLICT" | `assertThat(conflicts).isEqualTo(M)` ✓ + **catch 한 customMessage 가 *모두 같은 메시지* 인가** |
+| "raw 예외 0" | `others.isZero()` ✓ |
+| "메시지 일관성" / "사용자 응답 일관" | catch list 의 customMessage 가 단일 set: `failures.map { it.customMessage }.toSet().size <= 1` |
+
+**가드**: 동시성 E2E 의 catch 한 예외 list 를 단순히 카운트만 세지 말고 *메시지 일관성* 까지 어설션 — CE-1 의 회귀 가드.
+
+#### CE-4. *3축 (DB / 도메인 메모리 / 응답)* 정합 — 같은 사고가 어디서 잡히는가
+
+운영 코드의 한 도메인 사고는 다음 3축에서 *동일 결정* 을 만들어야 한다:
+
+1. **DB 레벨** — UNIQUE 제약 / `@Version` / `WHERE x > 0` 가드
+2. **도메인 메모리 레벨** — `canTransitTo(...)` / `init { require(...) }` / `requireOwner(...)`
+3. **Facade 응답 레벨** — try/catch 변환 + 메시지 일반화
+
+**가드**: 한 사고가 3축 모두 *같은 ErrorType + 같은 customMessage* 로 응답되는지 확인. 한 축만 막고 다른 축은 *다른 메시지* 면 분포 시나리오에서 회귀.
+
+#### CE-5. *3 회 더 의심* — Round 종료 전 마지막 sanity check
+
+검증을 끝내기 *전에* 다음 3 질문을 한 번 더 한다:
+
+1. **이 PR 의 어설션 100% 가 통과한다고 *진짜로* 동시성 사고 0 인가?** — 어설션이 검증하지 않는 사각지대 (메시지 / stale snapshot / cache staleness) 가 있는가?
+2. **이 catch 블록이 잡지 못하는 throw 경로가 있는가?** — 같은 try 안의 *그 위 라인* 까지 거슬러 throw 가능 위치 추적.
+3. **이 KDoc 의 강한 약속 ("차단" / "보장" / "방지" / "불가능") 이 *실제 코드* 와 정합한가?** — §19-B 와 한 쌍.
+
+3 회 모두 통과해야 *PASS 판정* 가능. 한 항목이라도 *불확실* 하면 fix 권고로 박제.
+
+#### CE-6. *PR 박제 ↔ 실 코드 정합* — pr.md / experiments-results.md 의 박제가 *실제 보호 수준* 과 일치하는가
+
+박제 문서 (pr.md / experiments-results.md / decision.md) 가 *미해결 위험* 으로 적은 항목이 *실제로는 코드에 가드가 있는* 경우, 또는 *해결됐다고 적은 항목* 이 *실제로는 race window 가 남아있는* 경우는 §19-B 의 *문서 거짓말* 의 PR 박제 버전.
+
+**점검**: 박제 문서의 "미해결 위험" / "트레이드오프" 섹션을 *코드 본문 grep* 으로 1:1 검증. 박제와 코드가 어긋나면 *박제 갱신* 또는 *코드 fix* 둘 중 하나.
+
+**원칙 (냉정 모드)**:
+- 표면 grep 으로 끝내지 않는다. *race window / 분포 시나리오* 추론까지 한다.
+- "어설션이 통과한다 = 결함 없음" 으로 결론 내지 않는다. *어설션이 검증하지 않는 사각지대* 가 본질적 위험.
+- *Facade try/catch 가 발견되면 try 블록 위 라인까지 거슬러* throw 가능 위치 추적.
+- 박제와 코드의 정합을 *마지막에 한 번 더* 본다.
 
 ---
 
@@ -125,8 +225,39 @@ Stayloop 의 기능 구현/리팩토링은 **이 스킬을 통과한 뒤에야 v
 - 외부 라이브러리(Spring Data, Jackson, Redis client, HTTP client, PG SDK 등) 가 새로 도입되었는가?
 - 새 외부 호출(DB 외) 이 도입되었는가? (트랜잭션·재시도·타임아웃 검토 대상)
 - **`.github/instructions/*.md` 중 어떤 것이 활성화되는가?** (변경 파일 경로 ↔ instruction `applyTo` 매치) — §0-A 의 활성화 규칙 표 참고
+- **변경이 동시성 / 트랜잭션 / 예외 흐름 영역인가?** — 그렇다면 §0-B 냉정 모드 6 체크리스트 (CE-1 ~ CE-6) 를 *명시적으로* 통과시킨다. *표면 grep 으로 끝내지 않는다.*
+- **§0-C 의 변경 카테고리 매핑 표** 로 *반드시 통과해야 할 룰 부분집합* 을 좁힌다. 변경이 매핑되는 모든 카테고리의 *필수 grep* 을 출력에 명시.
 
 > 출력: 검증 대상 파일과 활성 instruction 목록을 한 줄로 요약한 뒤 본격적인 점검을 시작한다.
+> **종료 직전 §0-B CE-5 (3 회 더 의심) 통과 어셔런스가 없으면 PASS 판정 금지** — 어설션이 통과한다고 결함 0 을 단언하지 않는다.
+
+---
+
+### 0️⃣-C 변경 카테고리 → 필수 체크리스트 매핑 (Catch-or-Miss Matrix)
+
+본 스킬의 룰 (§1~§19-B) 은 광범위하다. 매 라운드 *모든* 룰을 표면 grep 으로 훑으면 *어떤 룰이 적용되어야 했는지* 의 신호가 약해져 누락이 생긴다 (PR9 라운드에서 Copilot 이 잡은 4 패턴 — §6 비즈니스 의미 0 가드 / §8 Boolean 반환값 무시 / §11 catch 너비 / §19-B 부정 약속 — 이 모두 룰에는 있었지만 *변경 카테고리 ↔ 룰* 연결이 약했던 것이 원인).
+
+본 절은 *변경 파일의 카테고리* 와 *반드시 통과해야 할 룰 + 표준 grep 명령* 을 1:1 로 박제. **매 라운드 출력에 "활성 카테고리 + 필수 grep 결과" 를 명시** — 카테고리가 매치되었는데 grep 미실행이면 PASS 금지.
+
+| 변경 카테고리 (file pattern + diff 내용) | 필수 룰 (§) | 표준 grep / 점검 명령 |
+|---|---|---|
+| **VO `init { }` 변경** (`domain/**/value/*.kt` + `init {` 또는 `require(`) | §6 (입력 검증 / 비즈니스 의미 0 가드) + §13 (매직 상수) + §19-B(1) | `Grep "init \{\|require\(" path=domain/...` → 가드 기준이 "음수 / 0 / 빈" 중 *어디까지* 인지 비즈니스 의미와 대조. *0 이 의미 없는데 통과* 시키는 패턴은 P1. |
+| **Repository 인터페이스 KDoc 변경** (`domain/**/Repository*.kt` + KDoc 라인 변경) | §3 (시그니처 누출) + §19-B(1) (부정 약속 정합) | `Grep "필요 없다\|보장하지 않는다\|막지 않는다\|영향 없다\|변환 없이" path=domain/...` → 모든 *부정 약속* 의 위치를 *실 모델 필드 타입 / 구현체 동작* 과 1:1 대조. |
+| **Facade `try { } catch` 변경** (`application/**/*Facade.kt` + `try {` 또는 `catch (`) | §0-B CE-1 (catch scope 정합) + §11 (예외 너비) + §12 (메시지 일관성) | `Grep "try \{" path=application/...` 후 각 try 블록 *위 라인* 까지 거슬러 도메인 메서드 throw 가능 위치 추적. catch 블록의 변환 메시지가 같은 errorType 내에서 *단일 customMessage* 인지 확인. |
+| **동시성 E2E 테스트 추가/변경** (`test/**/*Concurrent*Test.kt` + `CountDownLatch`/`AtomicInteger`/`Executors`) | §0-B CE-3 (어설션 강도) + §9 (latch 동기화) + §11 (catch 너비) + §19-B(2) (어설션 ↔ DisplayName) | `Grep "ready\.await\|countDown\.await\|start\.await" path=test/...` → 모든 latch await 의 *반환값 (Boolean)* 이 `check(...)` / `assert` 로 검증되는지 확인. **`Grep "catch \(.*Exception\)" path=test/...Concurrent*Test.kt`** → catch 가 *카테고리 한정* (`PessimisticLockingFailureException` / `OptimisticLockingFailureException` / `DataIntegrityViolationException` 등) 인지 / 광범위 `catch (Exception)` 이 *single counter* 로 흡수되는지 확인. **catch list 의 메시지 일관성** 어설션 (`failures.map { it.customMessage }.toSet().size <= 1`) 존재 여부. |
+| **`@Column(length = N)` / `@Column(nullable = ...)` 변경** (`domain/**/*Model.kt` 또는 `value/*.kt`) | §1 (null 일관성) + §6 (length 가드) | `Grep "@Column.*length\s*=\s*\d+" path=domain/...` → 같은 파일에 `length >` 가드 존재 여부 + 두 N 이 같은 `companion const val` 로 묶여있는지. |
+| **비관적 락 / `saveAndFlush` / `@Version` 추가** | §9 (락 순서) + §16 (TX 의무) + §19-B(1) | `Grep "@Lock\(LockModeType\.PESSIMISTIC\|setLockMode.*PESSIMISTIC\|saveAndFlush\|@Version" path=...` → 호출 측 Facade 의 `@Transactional` 정합 + ORDER BY / 진입점 정렬 박제 둘 다. |
+| **Converter 변경** (`infrastructure/**/converter/*.kt` 또는 `@Converter`) | §1 (null 정책) + §11 (read/write 정책 비대칭) + §12 (cause 보존) | `Grep "convertToDatabaseColumn\|convertToEntityAttribute" path=infrastructure/...` → 두 메서드의 try/catch 구조가 *대칭* 인지 + 둘 다 cause 보존 + 로그 raw payload 길이 제한. |
+| **`@Embeddable VO` 또는 `@Embedded` 변경** | §6 (컬럼 중복 매핑) + §3 (시그니처 누출) | `Grep "@Column\(name\s*=\s*\"" path=domain/.../same-aggregate/` → 같은 entity 내 동일 컬럼명 중복 매핑 검출 (Hibernate bootstrap 폭발 방지). |
+| **InMemory 더블 변경** (`support/test/InMemory*Repository.kt`) | §19-A (운영-테스트 동치) + §3 | `diff` 본 파일과 운영 RepositoryImpl 의 *분기 의미론* (정렬 / 화이트리스트 / null 정책 / 예외 매핑) 을 한 표로 정리. 한 칸이라도 다르면 P1. |
+| **DTO ↔ 도메인 매핑 메서드 변경** (`*V1Dto.kt` + `from(...)` / `to(...)`) | §3 + §15 (가시성) + §19 (도메인 어휘) | `Grep "fun from\|fun to" path=interfaces/.../V1Dto.kt` → 도메인 모델의 모든 *입력 가능 필드* 가 매핑되는지 + 도메인 어휘와 일치. |
+
+**카테고리 매핑이 0건이면** (예: 순수 문서 변경 / `.claude/skills/**` 변경 / `docs/**`) 본 스킬을 N/A 로 종료. 그 외에는 *매치된 모든 카테고리* 의 필수 grep 을 *명시 출력* 한 후 PASS/FAIL 판정.
+
+**원칙**:
+- 매 라운드 출력은 `## 활성 카테고리` 절에 `[카테고리명] → [실행한 grep] → [결과 요약]` 표를 *반드시* 포함.
+- 카테고리에 매치되는 룰은 *명시* 되어야 한다. 검증자가 "본 변경에는 §6 가 적용 안 됨" 이라고 *판단* 한 근거가 출력에 드러나야 함.
+- 한 변경이 여러 카테고리에 매치되면 *모든* 카테고리의 grep 을 실행. 중복은 한 번만 표시.
 
 ---
 
@@ -239,6 +370,7 @@ Grep "^import io\.lettuce\.|^import redis\." path=apps/stay-api/src/main/kotlin/
 | **`@Embedded VO` 와 외부 entity 가 같은 컬럼명 매핑 (`@Column(name="X")`)** | `@Embedded property: PropertySnapshot` 의 `propertyId @Column(name="property_id")` + 외부 `var propertyId @Column(name="property_id")` → Hibernate bootstrap **컬럼 중복 매핑 예외**. 단위 테스트는 통과 (JPA 부트스트랩 미수반) — `@DataJpaTest` / 풀 컨텍스트 시점에 폭발 |
 | **cheap input 가드가 부수효과 *후* 에 발동** | Service 가 외부 자원(`inventories.forEach { reserveOne() }`)을 먼저 변경하고 *그 다음* `ReservationModel.create()` 가 `guestCount <= 0` 거절 — Facade TX 가 없거나 호출자가 예외를 잡으면 부분 변경 잔존. 검증 순서 위반의 강화판 |
 | **호출자 주입 컬렉션 ↔ Aggregate 정합 가드 부재** | `cancel(reservation, inventories)` 에서 inventories 의 roomTypeId / dates 가 reservation 과 일치하는지 검증 안 함 → 잘못된 자원 복원 가능 |
+| **비즈니스 의미 0 가드 누락 — "음수 거절" 만 하고 0 통과** | `DiscountValue(FIXED, rawValue=0)` 가 init 에서 `rawValue < 0` 만 거절 → 0원 정액 쿠폰이 등록은 통과, *적용 시점* 에 `ReservationModel` 의 *할인 0 ↔ 쿠폰 박제 null* 불변식과 충돌해 BAD_REQUEST 로 *지연 폭발*. 정석 가드 (`< 0`) 와 *비즈니스 합리성 가드* (`<= 0` — 0이면 의미 없음) 가 다르다. 도메인이 *입력은 받지만 어딘가에서 항상 실패* 하는 값을 통과시키면 회귀 사각지대. 0이 *의미 있는 값* (예: `wishCount`, 수량) 이면 `>= 0`, *의미 없는 값* (할인 금액 / 가격 / 객실 수) 이면 `> 0` — 컨텍스트 의존. 점검: 같은 값이 *다른 도메인 메서드에서 다시 가드되는지* 확인하고, 가드된다면 *발급 시점에서 원래 거절했어야* 한다. PR9 Copilot #1 라운드 박제. |
 
 **가드**:
 - `init { require(...) }` 또는 `if (...) throw CoreException(ErrorType.X, "...")`. DB 제약은 *마지막* 방어선.
@@ -285,8 +417,19 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 | `?: defaultValue` 가 비즈니스 의미 검토 없이 사용 | 잘못된 디폴트가 정답인 양 |
 | `try { ... } catch { return emptyList() }` | 진짜 실패 무시 |
 | `if (x.isNullOrBlank()) "" else x` 같은 정규화 없는 변환 | 의미 손실 |
+| **Boolean / 결과 반환값을 받아놓고 무시** — `latch.await(timeout)` / `tryLock()` / `compareAndSet()` / `Set.add()` / `Map.replace()` / `equals` / `condition.await(timeout)` | `latch.await(5, SECONDS)` 의 Boolean 반환을 무시하면 *타임아웃이 나도* 후속 라인이 실행 — 동시 출발 latch 의 *실패가 silent*. 결과: race window 가 안 만들어졌는데 테스트가 통과 → 회귀 가드 무력화. **Boolean 반환을 가진 모든 timed wait / try-action 은 `check(...)` 또는 `assertThat(...).isTrue()` 로 어셔런스**. 외부 라이브러리 (`HashSet.add` 등) 도 의미 있는 Boolean 이면 동일. PR9 Copilot #3/#5/#6/#8 라운드 박제. |
 
-**가드**: null / 빈 값이 정상 도메인 값이 아니면 즉시 예외.
+**가드**: null / 빈 값이 정상 도메인 값이 아니면 즉시 예외. **Boolean / 의미 있는 결과 반환값은 무시 금지** — `_ = await(...)` 처럼 의식적 무시도 코드 review 가 통과시키지 않게 *반드시 어설션* 으로 박제.
+
+**점검 명령** (반환값 무시 일괄 검출):
+```
+Grep "\.await\(\d+,\s*TimeUnit" path=apps/.../test glob="*Test.kt"
+→ 각 매치의 *바로 그 라인* 이 `check(...)` / `assertThat(...).isTrue()` 로 감싸여 있는지 확인.
+   감싸여 있지 않은 매치는 P1 — silent 실패 가능.
+
+Grep "tryLock\(\|compareAndSet\(\|\.add\(.*\)\s*$" path=apps/.../main glob="*.kt"
+→ Boolean 반환을 받아놓고 무시하는 패턴 추가 검출.
+```
 
 ---
 
@@ -301,8 +444,21 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 | `@Async` 메서드가 트랜잭션 컨텍스트 전파 가정 | 트랜잭션 끊김 |
 | 컬렉션 순회 중 변경 (`ConcurrentModificationException` 위험) | `for (x in list) list.remove(x)` |
 | 단일 스레드 가정의 카운터를 production 으로 그대로 가져감 | `wishCount += 1` race |
+| **다일자 (다중 row) 비관적 락 시 `ORDER BY` 미명시** — 락 획득 순서가 비결정적이면 두 트랜잭션이 *서로 다른 순서* 로 잡으면서 cycle / 데드락 발생 | `findInventoriesForUpdate(roomTypeId, dates)` 의 SQL 이 `WHERE date IN (?, ?, ...) FOR UPDATE` 만 있고 `ORDER BY date ASC` 누락 — 두 thread 가 dates `[5/10, 5/11]` ↔ `[5/11, 5/10]` 순서로 락 시도 → InnoDB cycle 검출 → 한쪽 deadlock victim. **락 순서를 SQL 과 *진입점 (Facade)* 양쪽에 명시** — Facade 가 `period.datesToReserve().sorted()` 로 호출하고 SQL 도 `ORDER BY date ASC` 박제. 둘 중 한쪽만 있으면 *문서 ↔ 가드 정합* 깨짐 (§19-B 와 한 쌍). |
+| **운영 atomic UPDATE 의 InMemory 더블이 *같은 인스턴스* 를 mutate** — Facade 응답값을 `entity.field + 1` 형태로 작성 시 운영(stale entity) ↔ InMemory(mutated entity) 응답이 갈림 | `WishlistFacade.wish` 가 `WishlistToggleInfo(wishCount = property.wishCount + 1)` — 운영(QueryDSL `update().execute()`) 은 entity manager 우회로 `property.wishCount` stale 유지, InMemory 의 `atomicIncrementWishCount` 가 도메인 메서드로 인스턴스 mutate. 결과: 운영 1 / InMemory 2. **atomic 호출 *이전* 의 값을 별도 변수로 박제** (`countBefore`) 하는 패턴이 정합 — verify-code §19-A 운영-테스트 동치. |
+| **동시성 E2E 의 latch 동기화 정합 (Boolean 반환 미확인)** | `ConcurrentXxxTest` 가 `ready.await(5, SECONDS)` 의 Boolean 반환을 무시 → 일부 worker 가 `start.await()` 에 도달하지 못한 채 `start.countDown()` 이 호출 → 동시 출발이 안 된 채로 테스트가 진행 → race window 가 안 만들어졌는데 *테스트는 통과* → 회귀 가드 무력화. **`check(ready.await(timeout, SECONDS)) { "..." }`** 또는 `assertThat(ready.await(...)).isTrue()` 로 *모든 latch await 의 Boolean 반환을 명시 어셔런스*. `done.await(...)` 도 동일. (§8 Boolean 반환값 무시 룰의 동시성 영역 강화) PR9 Copilot #3/#5/#6/#8 라운드 박제. |
 
-**가드**: 본 라운드(2~3주차)는 단일 스레드 가정 — 다만 **4주차에서 락/원자 연산이 들어올 자리** 를 본 라운드 코드가 이미 막지 않게 한다 (예: 카운터 갱신을 모델 메서드로 캡슐화).
+**가드**:
+- 본 라운드(2~3주차)는 단일 스레드 가정 — 다만 **4주차에서 락/원자 연산이 들어올 자리** 를 본 라운드 코드가 이미 막지 않게 한다 (예: 카운터 갱신을 모델 메서드로 캡슐화).
+- **다일자 락 ORDER BY 강제** (4주차 ③ Phase A/D 학습): Facade `@Transactional` 안에서 다중 row 비관적 락을 잡을 때, *SQL 의 ORDER BY 정렬* 과 *Facade 진입점의 입력 정렬* 둘 다 명시. 한쪽만 있으면 문서 거짓말 또는 Hibernate Optimization 으로 정렬이 사라질 위험.
+
+**점검 명령**:
+```
+Grep "@Lock\\(LockModeType\\.PESSIMISTIC_WRITE" path=apps/.../main → 모든 비관적 락 메서드
+Grep "setLockMode\\(.*PESSIMISTIC" path=apps/.../main → QueryDSL 비관적 락
+→ 각 메서드의 SQL 또는 QueryDSL 빌더에 `orderBy(...)` 가 있는지 확인
+→ Facade 호출 측에 `.sorted()` 또는 동등한 정렬 보장이 있는지 확인
+```
 
 ---
 
@@ -350,6 +506,10 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 | **로그에 raw payload 를 무제한 노출** (`log.warn("...dbData='{}'", dbData, e)`) | 길이/PII/시크릿 누설 — 로그 부피·보안 양쪽 함정 |
 | **KDoc `@property` vs `@param` 혼동** | `val/var` 없는 생성자 매개변수에 `@property` 를 적으면 IDE 가 link 를 못 찾고 문서가 거짓말. property 만 `@property`, 단순 매개변수는 `@param` |
 | **`CoreException` 의 `customMessage` 에 외부 식별자(LoginId / email / userId / 토큰 ID 등) 를 직접 박음** | `ApiControllerAdvice` 가 `customMessage` 를 응답으로 흘리므로 식별자가 클라이언트에 노출. 계정 enumeration / 식별자 추적 위험. `"사용자가 존재하지 않습니다: ${userId.value}"` 형태는 P1 보안 결함 |
+| **JPA 예외 (`OptimisticLockingFailureException` / `DataIntegrityViolationException` / `LockTimeoutException` / `PessimisticLockingFailureException`) 가 도메인 메시지로 *그대로* 노출** | Facade 가 catch 하지 않고 throw 가 layer 를 뚫고 ApiControllerAdvice 에 도달하면, 응답 메시지가 *Hibernate / Spring 내부 텍스트* (`"could not execute statement [Duplicate entry '1-1' for key 'wishlists.PRIMARY']"` 등) 로 직행. (a) 식별자 노출 (PK 컬럼 / row 값), (b) 도메인 의미 부재 (사용자가 *왜* 실패했는지 모름), (c) ApiControllerAdvice 매핑 불일치 (500 응답). **Facade 의 `try { repo.save(...) } catch (e: OptimisticLockingFailureException) { throw CoreException(CONFLICT, "이미 사용된 쿠폰입니다.", cause = e) }`** 패턴으로 일반화 + cause 보존 (4주차 ③ Phase B 학습). |
+| **Facade try/catch 의 *catch scope* 가 도메인 사고의 *모든 throw 경로* 를 감싸지 않음** (§0-B CE-1 정합) | Facade 가 `model.someMethod()` 호출 *후* `try { repo.save(model) } catch (e: JpaException) { ... }` — `model.someMethod()` 가 *자체 도메인 검증* (`canTransitTo(...)` / `requireOwner(...)`) 으로 throw 하면 catch 밖으로 흘러 *다른 메시지* 로 응답. 같은 사고 (예: "이미 사용된 쿠폰") 가 REPEATABLE_READ snapshot 분포에 따라 *흐름 1 (snapshot 이전 시작 → JPA 예외)* / *흐름 2 (snapshot 이후 시작 → 도메인 throw)* 로 갈리고, 두 메시지가 다르면 UX 일관성 깨짐 (분포 시나리오 §0-B CE-2). **try 블록을 그 도메인 사고의 *모든 throw 위치* (도메인 메서드 + Repository) 까지 확장** + `catch (e: CoreException) { if (e.errorType == ConflictType) throw CoreException(ConflictType, "<일반화 메시지>", cause = e); throw e }` 로 *errorType 별 분기 + 메시지 정규화*. 4주차 ③ PR 의 cold-eye 라운드에서 발견. |
+| **catch 한 예외의 *cause 보존* 이 도중에 끊김** | `catch (e: JpaException) { throw CoreException(CONFLICT, "메시지") }` — `cause = e` 누락 시 stack trace 단절. 운영에서 *어느 SQL / 어느 row* 였는지 추적 불가. 모든 catch 후 throw 는 `cause = e` 명시 필수. |
+| **동시성 E2E 테스트의 catch 너비가 *카테고리 한정* 이 아니라 *광범위 흡수*** — 의도된 catch 인 척 위장한 silent 마스킹 | `ConcurrentXxxTest` 가 `} catch (e: Exception) { conflicts.incrementAndGet() }` 으로 *모든* 예외를 단일 카운터로 흡수. NPE / AssertionError / Spring 컨텍스트 실패 / DB 설정 문제 같은 회귀 신호도 conflict 로 흘러 *테스트는 통과*. **catch 의 의도된 카테고리만 conflicts** (`PessimisticLockingFailureException` / `OptimisticLockingFailureException` / `DataIntegrityViolationException` / 도메인 `CoreException(CONFLICT)`), **그 외는 별도 `others` 카운터로 분리** 하고 *최종 어설션이 `others.isZero()`* 를 강제. 단순 §11 "광범위 catch" 룰의 *동시성 테스트* 영역 강화 — 동시성 테스트는 *의도된 흡수가 정상* 으로 보이지만, 사실은 *카테고리 한정 흡수가 정상* 이고 그 외는 회귀 신호. PR9 Copilot #4/#7/#9 라운드 박제. |
 
 **가드**:
 - **`CoreException(errorType, customMessage, cause)` 시그니처를 항상 사용** — `cause` 로 원인 보존.
@@ -358,6 +518,7 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 - **read 측이 try/catch 라면 write 측도 동일 정책으로 감싼다** — Jackson 의 `writeValueAsString` 도 `JsonProcessingException` 을 던질 수 있다. 한 컨버터 안에서 한 쪽만 감싸면 비대칭 (Copilot 3차 가드).
 - **로그에 들어가는 raw payload 는 길이 + 프리뷰만**. 예: `log.warn("X 역직렬화 실패. length={}, preview='{}'", dbData.length, dbData.take(80), e)`. PREVIEW_LIMIT 은 `private const`.
 - **`CoreException(ErrorType.X, customMessage)` 의 `customMessage` 는 *클라이언트 응답으로 직행* 한다** — `ApiControllerAdvice` 가 그대로 `ErrorResponse.message` 로 흘림. 따라서 식별자(LoginId / email / userId / reservationId / token) 를 메시지에 박지 않는다. 메시지는 `"사용자가 존재하지 않습니다."` 처럼 일반화하고, 식별자는 별도로 `log.warn("user not found loginId={}", loginId.value)` 로 서버 로그에만 남긴다. 운영-테스트 동치를 위해 InMemory 더블의 메시지도 동일 정책 (§19-A).
+- **JPA 예외 → CoreException 변환은 Facade 책임** (4주차 ③ Phase B 박제): 도메인 / Repository 가 throw 한 raw JPA 예외 (`OptimisticLockingFailureException`, `DataIntegrityViolationException`, `LockTimeoutException`, `PessimisticLockingFailureException` 등) 는 *Application Layer 의 Facade try/catch* 에서 `CoreException(ErrorType.CONFLICT, "<도메인 메시지>", cause = e)` 로 변환. 같은 도메인 사고 (예: "이미 사용된 쿠폰") 가 여러 JPA 예외 경로 (낙관적 락 vs UNIQUE) 로 발생할 수 있으면 두 catch 블록의 *throw 메시지를 동일* 하게 — 클라이언트 응답이 일관되게 보이고, cause 의 분기 정보로 운영 디버깅은 가능.
 
 ```kotlin
 override fun convertToDatabaseColumn(attribute: T?): String {
@@ -435,8 +596,19 @@ override fun convertToEntityAttribute(dbData: String?): T {
 | `@Transactional` 메서드가 같은 클래스의 다른 메서드 호출 (self-invocation) | TX 적용 안됨 |
 | Lazy 컬렉션을 트랜잭션 밖에서 접근 | LazyInitializationException |
 | `flush()` / `clear()` 직접 호출 | 영속성 컨텍스트 의도 깨짐 |
+| **`@Lock(PESSIMISTIC_WRITE)` / `setLockMode(PESSIMISTIC_WRITE)` 메서드를 *트랜잭션 밖* 에서 호출** | Facade `@Transactional` 누락 또는 *별도 메서드의 `@Transactional` 가 없는 호출자* 가 직접 호출 → 락이 statement 종료 즉시 해제 → 후속 read-modify-write 가 race window 노출. 비관적 락의 *목적 자체가 무력화*. **반드시 Facade `@Transactional` 안에서만 호출** — 도메인 서비스 / Repository 내부에서 직접 호출 X. |
+| **`saveAndFlush` 가 호출 시점 throw 의미를 약속하는데 `@Transactional` 밖에서 호출** | Facade 가 `@Transactional` 누락 시 `saveAndFlush` 가 *자체 TX* 로 commit → `@Version` 충돌은 *commit 시점* 에 throw. Facade try/catch 가 잡지 못함. **`saveAndFlush` 도 비관적 락과 동일하게 Facade `@Transactional` 안에서만 의미 있음** — 호출 시점 throw 의 의미 계약이 TX 경계에 의존. |
 
-**가드**: `@Transactional` = Facade 한 곳. Lazy 컬렉션은 Facade 내부에서만 접근.
+**가드**:
+- `@Transactional` = Facade 한 곳. Lazy 컬렉션은 Facade 내부에서만 접근.
+- **비관적 락 / saveAndFlush 의 트랜잭션 의무 명시**: 도메인 Repository 인터페이스 KDoc 에 *"본 메서드는 `@Transactional` 안에서만 호출되어야 한다"* 박제. 호출자가 무심코 `@Transactional` 누락 시 *문서 거짓말* 검출 (§19-B 와 한 쌍).
+
+**점검 명령**:
+```
+Grep "@Lock\\(LockModeType\\.PESSIMISTIC|setLockMode\\(.*PESSIMISTIC|saveAndFlush" path=apps/.../main → 모든 비관적 락 / saveAndFlush 호출
+→ 각 호출 측 메서드를 추적해 *진입점 (Facade)* 의 `@Transactional` 어노테이션 확인
+→ KDoc 의 "@Transactional 안에서만" 약속 ↔ 실제 호출자의 가드 정합
+```
 
 ---
 
@@ -570,6 +742,7 @@ KDoc / `@DisplayName` / 주석은 **명세 문서** 다. 실제 동작과 어긋
 | 확인 | 위반 예 |
 |---|---|
 | **KDoc / 주석의 강한 약속(`차단한다` / `보장한다` / `방지한다` / `불가능`) 과 실제 가드 불일치** | "Int overflow 차단" 이라고 적혀 있는데 실제로는 size 상한만 있고 page 가드 없음 — 문서가 *거짓말*. 호출자/리뷰어가 잘못 신뢰 |
+| **KDoc 의 *부정 약속* (`필요 없다` / `보장하지 않는다` / `막지 않는다` / `영향 없다` / `변환 없이`) 과 실제 동작 불일치** — 긍정 약속만큼 강한 클레임 | Repository KDoc 이 "Issue 자체가 `userId: LoginId` 를 보존하므로 BIGINT 변환은 필요 없다" 라고 단언했지만, 실제로 `CouponIssueModel.userId: Long` (BIGINT) 이고 운영/InMemory 구현체 *모두* `findByLoginId(...)?.id` 변환 수행 → 문서가 *변환 책임 위치* 와 *N+1 위험* 을 잘못 전달. 후임이 KDoc 만 보고 *변환 없는 것으로 가정* 하면 잘못된 의사결정. **부정 약속 (`필요 없다` / `보장하지 않는다` / `막지 않는다`) 도 표면 grep 룰** — 매 라운드 `Grep "필요 없다\|보장하지 않는다\|막지 않는다\|영향 없다\|변환 없이"` 로 검출하고 실 모델 / 구현체와 1:1 대조. PR9 Copilot #2 라운드 박제. |
 | **메서드 KDoc 의 *흐름 설명* (numbered steps / "1." "2." "3.") 과 실제 호출 순서·시그니처 불일치** | KDoc (2): "각 Property 의 RoomType 목록 조회 (`findAllByPropertyIds` 묶음)" 라고 batch 조회를 약속하는데, 실제 구현은 `for property → roomTypeRepository.findByPropertyId(property.id)` N+1. 문서는 batch 인 줄 알고 운영 부하 산정·후임 리팩토링 의사결정이 어긋남 |
 | **KDoc 의 미완성 문장 / 끊긴 bullet** | "5. 가용 객실 중 *최저 합산가* 선택 — Property 단위 대표가" — `대표가` 뒤가 잘림. 의미 불완전 → 회귀 시 해당 단계의 *원래 의도* 를 후임이 추측 |
 | **KDoc 의 "고정" / "비어있어야 함" 같은 강한 정책 약속이 실제 가드 부재** | "정렬은 wishedAt DESC 고정 (page.sort 비어있어야 함)" 이라고 했지만 Facade 가 `require(page.sort.isEmpty())` 가드 없이 그대로 Repository 로 전달 — Repository 단에서 막아도 Facade 계약이 모호해지고, 다른 호출자(테스트 / 다른 Facade) 가 신뢰할 기준이 흐려짐 |
@@ -590,6 +763,8 @@ KDoc / `@DisplayName` / 주석은 **명세 문서** 다. 실제 동작과 어긋
 | **DisplayName 이 "정렬" / "순서" / "DESC" / "ASC" / "최신순" / "오래된 순" 을 약속하는데 어설션이 `containsExactlyInAnyOrder` / `hasSize` / `containsAll` 로 순서 미검증** | "wishedAt DESC 순으로 반환" 인데 `containsExactlyInAnyOrder(first.id, second.id)` — 정렬이 깨져도 통과. fixedClock 으로 동률이라 어쩔 수 없다는 *주석* 이 있어도, 그러면 DisplayName 을 "조회 성공" 으로 완화하거나 seed 시각을 분리해 진짜 순서를 검증해야 함 — 둘 중 하나로 정합 |
 | **DisplayName 이 "N건 반환" / "빈 리스트" / "단건" 처럼 cardinality 를 약속하는데 어설션이 `hasSize` / `isEmpty` / `hasSize(1)` 로 명시 검증 안 함** | 결과가 의도와 다른 size 여도 통과 |
 | **DisplayName 이 "본인 자원만 조회" / "FORBIDDEN" 같은 인가 정책을 약속하는데 어설션이 ErrorType 까지 보지 않음** | 정책 회귀(FORBIDDEN → NOT_FOUND 등) 가 silent |
+| **동시성 E2E 어설션이 `errorType` 만 검증, *catch 한 customMessage 일관성* 미검증** (§0-B CE-3 정합) | `ConcurrentXxxTest` 가 `assertThat(failures.errorType).isEqualTo(CONFLICT)` 만 보고 *서로 다른 메시지* (예: "이미 사용된 쿠폰입니다." vs "현재 상태(USED) 에서 USED 로 전이할 수 없습니다.") 가 응답으로 갈려도 통과. CE-1 (catch scope 정합) 의 회귀 가드 부재. **권고**: `failures.map { (it as CoreException).customMessage }.toSet().size <= 1` 또는 `expected: "이미 사용된 쿠폰입니다."` 로 단언 — 메시지 일관성 회귀 가드. |
+| **동시성 E2E 어설션이 *commit 분포* 시나리오 미커버** | latch 동기화로 *분포 1 (snapshot 이전 시작)* 만 검증 — 분포 2 (snapshot 이후 시작) 의 도메인 throw 경로 미발동. CE-2 (분포 시나리오) 정합 깨짐. 별도 시나리오 (사전 commit + Thread.sleep) 추가 또는 *영구 한계 박제* 둘 중 하나. |
 
 #### (3) 서로 다른 진실 원천(KDoc / DisplayName / `.github/instructions` / Repository 인터페이스 KDoc) 간 충돌
 
@@ -613,6 +788,9 @@ KDoc / `@DisplayName` / 주석은 **명세 문서** 다. 실제 동작과 어긋
 ```
 Grep "차단|보장|방지|불가능|고정|비어있어야|반드시" path=apps/.../main glob="*.kt"
 → 각 약속의 위치를 보고 *같은 파일 / 같은 메서드 본문* 에 대응 가드가 있는지 대조
+
+Grep "필요 없다|보장하지 않는다|막지 않는다|영향 없다|변환 없이" path=apps/.../main glob="*.kt"
+→ KDoc 의 *부정 약속* 위치를 *실 모델 필드 타입 / 구현체 동작* 과 1:1 대조 (PR9 Copilot #2 룰)
 
 Grep "^\s*\*\s*\d+\.\s" path=apps/.../main glob="*.kt"
 → KDoc 의 numbered step 추출 후 메서드 본문의 호출 시그니처와 1:1 대조
@@ -711,8 +889,16 @@ verify-tests 게이트가 그 테스트를 강제 — 두 게이트는 한 쌍.
 - 1) ...
 - 2) ...
 
+### 냉정 모드 체크리스트 (§0-B) — 통과 어셔런스
+- CE-1 (catch scope 정합): ✅ / ❌ — try 블록이 모든 throw 경로 감쌈
+- CE-2 (분포 시나리오 추론): ✅ / ❌ — REPEATABLE_READ 이전/이후 분포 모두 검증
+- CE-3 (어설션 강도): ✅ / ❌ — DisplayName 동사·정책 1:1 어설션 + customMessage 일관성
+- CE-4 (3축 정합): ✅ / ❌ — DB / 도메인 메모리 / Facade 응답 모두 같은 사고 일관 처리
+- CE-5 (3 회 더 의심): ✅ / ❌ — 어설션 사각지대 / catch 못 잡는 throw / KDoc 거짓말 재확인
+- CE-6 (PR 박제 ↔ 코드 정합): ✅ / ❌ — pr.md / experiments-results.md 의 "미해결 위험" / "트레이드오프" 가 코드 본문과 일치
+
 ### 게이트 결정
-- ✅ PASS — verify-architecture 진행 가능
+- ✅ PASS — verify-architecture 진행 가능 (CE-1 ~ CE-6 모두 ✅)
 - ❌ FAIL — 다음 항목 보완 필요 (우선순위 P0/P1/P2):
   - P0) ...
   - P1) ...
@@ -741,17 +927,24 @@ P0 위반 1건도 FAIL. P1 / P2 는 누적 정도와 영향 범위로 판단.
 6. **부수효과 이전 cheap input guard 누락** — 외부 자원 mutation (`reserveOne()` / `releaseOne()` / `save()`) 이전에 `> 0` / `not blank` 같은 비싸지 않은 검증을 끝내지 않으면 부분 변경 시점이 발생 P1. Strong Exception Safety 의 service-level 강화.
 7. **외부 주입 컬렉션 ↔ Aggregate 식별자 가드 부재** (`cancel(reservation, inventories)` 등) — 호출자 실수로 다른 자원을 mutate 하는 정합성 오류 P1. mutate 이전 가드 + 단위 테스트로 회귀 방지.
 8. **`set(A) == set(B)` 단독 비교의 중복 사각지대** — list 의 1:1 매칭이 본질이면 `size + set` 페어 P1.
+9. **다일자 (다중 row) 비관적 락 의 `ORDER BY` 미명시** — 락 획득 순서 비결정 → 데드락 P1. SQL `ORDER BY date ASC` + Facade 진입점 `.sorted()` 양쪽 명시.
+10. **JPA 예외 (`OptimisticLockingFailureException` / `DataIntegrityViolationException`) 가 클라이언트 응답으로 노출** — 식별자 노출 + 도메인 의미 부재 P1. Facade try/catch 로 `CoreException(CONFLICT, ..., cause = e)` 변환.
+11. **`@Lock(PESSIMISTIC_WRITE)` / `saveAndFlush` 가 `@Transactional` 밖에서 호출** — 락 즉시 해제 / 호출 시점 throw 의미 깨짐 P1. Facade `@Transactional` 안에서만 호출 + Repository 인터페이스 KDoc 박제.
+12. **Facade try/catch 의 catch scope 가 *모든 throw 경로* 를 감싸지 않음** (§0-B CE-1 / §12 신규 룰) — `model.someMethod()` 호출이 try 밖이고 *자체 도메인 검증 throw* 가 catch 안 잡혀 메시지 일관성 깨짐 P1. 같은 도메인 사고가 REPEATABLE_READ 분포에 따라 *2 흐름* (JPA 예외 / 도메인 throw) 으로 갈려도 *동일 메시지* 응답이 강제. try 블록을 *모든 throw 위치* 까지 확장 + `CoreException catch 의 errorType 별 메시지 정규화*. **회귀 가드는 동시성 E2E 의 customMessage 일관성 어설션** (§19-B CE-3).
+13. **동시성 E2E 어설션이 *상태 정합 (성공 카운트 / DB 값)* 만 보고 *메시지 일관성* 미검증** (§0-B CE-3) — CE-1 / 12번의 회귀 가드 부재 P1. `failures.map { customMessage }.toSet().size <= 1` 추가.
 
-위 8가지를 P2 로 보류하려면 **명시적 사유** ("4주차 동시성 영역", "별도 인프라 라운드" 같은 *일반화 가능한 이유*) 가 PR 본문에 박혀야 한다. "본 PR scope 외" 같은 모호한 사유로 미루면 다음 라운드에 외부 리뷰로 다시 잡힘.
+위 13가지를 P2 로 보류하려면 **명시적 사유** ("4주차 동시성 영역", "별도 인프라 라운드" 같은 *일반화 가능한 이유*) 가 PR 본문에 박혀야 한다. "본 PR scope 외" 같은 모호한 사유로 미루면 다음 라운드에 외부 리뷰로 다시 잡힘.
 
 ---
 
 ### 2️⃣3️⃣ 톤 & 원칙
 
-- **기본은 검증자 모드** — 코드를 직접 수정하지 않는다. 위반을 적시하고 어떻게 고칠지는 개발자가 결정한다.
+- **기본은 검증자 모드 + 냉정 모드 (§0-B)** — 코드를 직접 수정하지 않는다. 위반을 적시하고 어떻게 고칠지는 개발자가 결정한다. 냉정 모드는 *항상 활성* — 표면 grep 으로 끝내지 않고 race window / 분포 시나리오 / 어설션 강도 / 다중 throw 경로까지 추론한다.
+- **표면 점검 금지** — "어설션이 통과한다 = 결함 없음" 의 단언 X. *어설션이 검증하지 않는 사각지대* 가 본질적 위험. 동시성 / 트랜잭션 / 예외 흐름 영역에서는 §0-B CE-1 ~ CE-6 6 항목을 *명시적으로* 통과시킨다.
 - **회귀 모드(§0-A) 진입 시에만 수정자 모드** — 사용자가 명시한 경우에 한해 fix 까지 직접 적용하고 자체 회귀 루프를 돈다. defect-zero 도달 후 *반드시* 멈추고 작업 트리 상태를 보고한다. 커밋·푸시는 자동 진행 금지.
 - 100% 순수성을 강요하지 않는다. 이탈은 **이유와 함께** 명시되어야 PASS.
 - FAIL 시 **회귀 방지 테스트도 함께** 권고한다 — verify-tests 게이트가 받는다.
 - "지적이 많아 보일 때" 는 우선순위로 압축한다 — P0 부터 해소되면 P1/P2 는 후속 PR.
+- **사용자가 "더 냉정하게 / 꼼꼼하게 / 더 깊게" 를 명시하면** Round 0 (§0-A) 부터 PR 전체 scope 재검토 + §0-B 6 체크리스트 *명시적 라벨링* 으로 답한다. 이전 라운드의 PASS 결론을 *복붙* 하지 않는다 — 같은 영역도 *분포 / scope / catch boundary* 차원에서 다시 본다.
 - 한국어 응답을 기본으로 한다.
 - 본 스킬이 FAIL 이면 verify-architecture 로 넘어가지 않는다 — 경계가 멀쩡해도 본문에 사일런트 사고가 있으면 의미 없다.

@@ -2,6 +2,15 @@ package com.stayloop.application.reservation
 
 import com.stayloop.application.reservation.command.ReserveCommand
 import com.stayloop.domain.common.value.Money
+import com.stayloop.domain.coupon.CouponIssueModel
+import com.stayloop.domain.coupon.CouponIssueService
+import com.stayloop.domain.coupon.CouponTemplateModel
+import com.stayloop.domain.coupon.value.CouponIssueStatus
+import com.stayloop.domain.coupon.value.CouponName
+import com.stayloop.domain.coupon.value.DiscountType
+import com.stayloop.domain.coupon.value.DiscountValue
+import com.stayloop.domain.coupon.value.ExpirationPeriod
+import com.stayloop.domain.coupon.value.MinOrderAmount
 import com.stayloop.domain.inventory.DailyRoomInventoryModel
 import com.stayloop.domain.property.PropertyModel
 import com.stayloop.domain.property.RoomTypeModel
@@ -21,15 +30,24 @@ import com.stayloop.domain.reservation.ReservationService
 import com.stayloop.domain.reservation.value.GuestInfo
 import com.stayloop.domain.reservation.value.ReservationStatus
 import com.stayloop.domain.reservation.value.StayPeriod
+import com.stayloop.domain.user.UserModel
+import com.stayloop.domain.user.value.BirthDate
+import com.stayloop.domain.user.value.Email
 import com.stayloop.domain.user.value.LoginId
 import com.stayloop.domain.user.value.PhoneNumber
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
+import com.stayloop.support.test.FakePasswordEncoder
+import com.stayloop.support.test.InMemoryCouponIssueRepository
+import com.stayloop.support.test.InMemoryCouponTemplateRepository
 import com.stayloop.support.test.InMemoryDailyRoomInventoryRepository
 import com.stayloop.support.test.InMemoryDailyRoomRateRepository
 import com.stayloop.support.test.InMemoryPropertyRepository
 import com.stayloop.support.test.InMemoryReservationRepository
 import com.stayloop.support.test.InMemoryRoomTypeRepository
+import com.stayloop.support.test.InMemoryUserRepository
+import java.time.LocalDateTime
+import com.stayloop.domain.user.value.Name as UserName
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.BeforeEach
@@ -46,6 +64,9 @@ class ReservationFacadeTest {
     private lateinit var inventories: InMemoryDailyRoomInventoryRepository
     private lateinit var rates: InMemoryDailyRoomRateRepository
     private lateinit var reservations: InMemoryReservationRepository
+    private lateinit var users: InMemoryUserRepository
+    private lateinit var couponTemplates: InMemoryCouponTemplateRepository
+    private lateinit var couponIssues: InMemoryCouponIssueRepository
     private lateinit var sut: ReservationFacade
 
     private val loginId = LoginId("alen01")
@@ -55,6 +76,8 @@ class ReservationFacadeTest {
         java.time.Instant.parse("2026-05-04T10:00:00Z"),
         ZoneId.of("Asia/Seoul"),
     )
+    private val now: LocalDateTime = LocalDateTime.parse("2026-05-04T19:00:00")
+    private val encoder = FakePasswordEncoder()
 
     @BeforeEach
     fun setUp() {
@@ -63,6 +86,9 @@ class ReservationFacadeTest {
         inventories = InMemoryDailyRoomInventoryRepository()
         rates = InMemoryDailyRoomRateRepository()
         reservations = InMemoryReservationRepository()
+        users = InMemoryUserRepository()
+        couponTemplates = InMemoryCouponTemplateRepository()
+        couponIssues = InMemoryCouponIssueRepository(users)
         sut = ReservationFacade(
             reservationRepository = reservations,
             inventoryRepository = inventories,
@@ -70,6 +96,10 @@ class ReservationFacadeTest {
             propertyRepository = properties,
             roomTypeRepository = roomTypes,
             reservationService = ReservationService(ReservationPriceCalculator()),
+            couponIssueRepository = couponIssues,
+            couponTemplateRepository = couponTemplates,
+            couponIssueService = CouponIssueService(),
+            userRepository = users,
             clock = fixedClock,
         )
     }
@@ -202,6 +232,129 @@ class ReservationFacadeTest {
         assertThat(other.reservationId).isNotEqualTo(mine.reservationId)
     }
 
+    @DisplayName("쿠폰 적용 — issue 가 USED 로 전이되고 reservation 박제에 priceBeforeDiscount / discountAmount / couponId 가 채워진다.")
+    @Test
+    fun shouldApplyCouponAndMarkIssueUsed() {
+        val (property, roomType) = seedPropertyWithRoomType()
+        seedAllDates(roomType.id, totalRooms = 3, reservedRooms = 0, pricePerNight = 100_000)
+        val user = saveUser(loginId.value)
+        val template = saveCouponTemplate(code = "WELCOME10", rate = 10L, expiredAt = now.plusDays(30))
+        val issue = saveCouponIssue(template.id, user.id)
+
+        val info = sut.reserve(reserveCommand(property.id, roomType.id, couponId = issue.id))
+
+        // 200_000 (2박 × 100_000) → 10% 할인 → 180_000
+        assertThat(info.priceBeforeDiscount).isEqualTo(Money.of(200_000L))
+        assertThat(info.discountAmount).isEqualTo(Money.of(20_000L))
+        assertThat(info.totalPrice).isEqualTo(Money.of(180_000L))
+        assertThat(info.couponId).isEqualTo(issue.id)
+        assertThat(info.couponCode).isEqualTo("WELCOME10")
+        // issue 가 USED 로 전이되었는지 회귀 가드
+        val updated = couponIssues.findById(issue.id)!!
+        assertThat(updated.status).isEqualTo(CouponIssueStatus.USED)
+        assertThat(updated.usedReservationId).isEqualTo(info.reservationId)
+    }
+
+    @DisplayName("쿠폰 미적용 (couponId = null) — 기존 흐름 회귀 — couponSnapshot 은 null, discountAmount = 0.")
+    @Test
+    fun shouldKeepLegacyFlowWhenCouponIdNull() {
+        val (property, roomType) = seedPropertyWithRoomType()
+        seedAllDates(roomType.id, totalRooms = 3, reservedRooms = 0, pricePerNight = 100_000)
+
+        val info = sut.reserve(reserveCommand(property.id, roomType.id))
+
+        assertThat(info.couponId).isNull()
+        assertThat(info.discountAmount).isEqualTo(Money.ZERO)
+        assertThat(info.priceBeforeDiscount).isEqualTo(info.totalPrice)
+    }
+
+    @DisplayName("타 사용자 쿠폰 — 식별자 노출 없이 BAD_REQUEST 로 거절한다 (verify-code §12).")
+    @Test
+    fun shouldRejectOtherUsersCoupon() {
+        val (property, roomType) = seedPropertyWithRoomType()
+        seedAllDates(roomType.id, totalRooms = 3, reservedRooms = 0, pricePerNight = 100_000)
+        saveUser(loginId.value)
+        val others = saveUser(otherLoginId.value)
+        val template = saveCouponTemplate(code = "OTHERS", rate = 10L, expiredAt = now.plusDays(30))
+        val foreignIssue = saveCouponIssue(template.id, others.id)
+
+        assertThatThrownBy {
+            sut.reserve(reserveCommand(property.id, roomType.id, couponId = foreignIssue.id))
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
+
+    @DisplayName("만료된 쿠폰 — BAD_REQUEST 로 거절하고 inventory 부분 차감이 일어나지 않는다.")
+    @Test
+    fun shouldRejectExpiredCouponWithoutPartialDecrement() {
+        val (property, roomType) = seedPropertyWithRoomType()
+        seedAllDates(roomType.id, totalRooms = 3, reservedRooms = 0, pricePerNight = 100_000)
+        val user = saveUser(loginId.value)
+        val expired = saveCouponTemplate(code = "EXPIRED", rate = 10L, expiredAt = now.minusSeconds(1))
+        val issue = saveCouponIssue(expired.id, user.id)
+
+        assertThatThrownBy {
+            sut.reserve(reserveCommand(property.id, roomType.id, couponId = issue.id))
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+
+        // 쿠폰 검증 실패는 재고 차감 *전* 에 발동되어야 함 (Strong Exception Safety 회귀 가드)
+        assertThat(inventories.findById(roomType.id, period.checkIn)?.reservedRooms).isEqualTo(0)
+        // issue 도 AVAILABLE 그대로 (silent 사고 차단)
+        assertThat(couponIssues.findById(issue.id)?.status).isEqualTo(CouponIssueStatus.AVAILABLE)
+    }
+
+    @DisplayName("이미 사용된 쿠폰 — CONFLICT (issue.use 가 검증) 로 거절.")
+    @Test
+    fun shouldRejectAlreadyUsedCoupon() {
+        val (property, roomType) = seedPropertyWithRoomType()
+        seedAllDates(roomType.id, totalRooms = 3, reservedRooms = 0, pricePerNight = 100_000)
+        val user = saveUser(loginId.value)
+        val template = saveCouponTemplate(code = "USED", rate = 10L, expiredAt = now.plusDays(30))
+        val issue = saveCouponIssue(template.id, user.id)
+        // 첫 사용
+        sut.reserve(reserveCommand(property.id, roomType.id, couponId = issue.id))
+
+        // 두 번째 사용 시도 — 같은 issue, 다른 일자
+        seedAllDates(roomType.id, totalRooms = 3, reservedRooms = 0, pricePerNight = 100_000) // 다일자 차감 후 재초기화 (단일 inMemory 큰 카운트 가정)
+        assertThatThrownBy {
+            sut.reserve(reserveCommand(property.id, roomType.id, couponId = issue.id))
+        }.isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.CONFLICT)
+    }
+
+    private fun saveUser(loginIdString: String): UserModel {
+        val user = UserModel.create(
+            loginId = LoginId(loginIdString),
+            rawPassword = "Abcd1234!",
+            name = UserName("홍길동"),
+            birthDate = BirthDate(LocalDate.of(2000, 1, 1)),
+            email = Email("$loginIdString@stayloop.io"),
+            phoneNumber = PhoneNumber("010-1234-5678"),
+            encoder = encoder,
+        )
+        return users.save(user)
+    }
+
+    private fun saveCouponTemplate(
+        code: String,
+        rate: Long,
+        expiredAt: LocalDateTime,
+    ): CouponTemplateModel {
+        val template = CouponTemplateModel.create(
+            code = code,
+            name = CouponName("$code 쿠폰"),
+            discountValue = DiscountValue(type = DiscountType.RATE, rawValue = rate),
+            expirationPeriod = ExpirationPeriod(expiredAt = expiredAt),
+            // 본 테스트는 200,000 결제 + 100,000 최소 — 적용 가능
+            minOrderAmount = MinOrderAmount(Money.of(100_000L)),
+        )
+        return couponTemplates.save(template)
+    }
+
+    private fun saveCouponIssue(templateId: Long, userId: Long): CouponIssueModel =
+        couponIssues.save(CouponIssueModel.issue(templateId, userId, now))
+
     private fun seedPropertyWithRoomType(maxGuests: Int = 2): Pair<PropertyModel, RoomTypeModel> {
         val property = saveProperty()
         val roomType = saveRoomType(propertyId = property.id, name = "스탠다드", maxGuests = maxGuests)
@@ -253,6 +406,7 @@ class ReservationFacadeTest {
         roomTypeId: Long,
         userId: LoginId = loginId,
         guestCount: Int = 2,
+        couponId: Long? = null,
     ) = ReserveCommand(
         userId = userId,
         propertyId = propertyId,
@@ -260,5 +414,6 @@ class ReservationFacadeTest {
         period = period,
         guestCount = guestCount,
         guest = GuestInfo(name = "홍길동", phoneNumber = PhoneNumber("010-1234-5678")),
+        couponId = couponId,
     )
 }
