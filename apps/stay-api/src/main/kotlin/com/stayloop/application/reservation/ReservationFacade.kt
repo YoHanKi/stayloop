@@ -23,6 +23,8 @@ import com.stayloop.domain.user.UserRepository
 import com.stayloop.domain.user.value.LoginId
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
+import org.springframework.dao.DataIntegrityViolationException
+import org.springframework.dao.OptimisticLockingFailureException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.Clock
@@ -137,9 +139,21 @@ class ReservationFacade(
         val saved = reservationRepository.save(reservation)
 
         // 예약 저장으로 reservation.id 가 부여된 *후* 쿠폰 사용 처리 (CouponIssueService KDoc 의 시간 분리).
+        // **동시성 변환** (`docs/plan/week4.md` ③ Phase B-2) — `@Version` 낙관적 락 충돌 또는
+        // `used_reservation_id` UNIQUE 제약 위반은 모두 *같은 의미* (이미 사용된 쿠폰의 동시 사용) 이므로
+        // CONFLICT 로 일반화. 식별자 (couponId / userId / reservationId) 는 메시지에 노출하지 않는다
+        // (verify-code §12). JPA 예외는 `cause` 로 보존되어 서버 로그에서만 추적 (ApiControllerAdvice 가
+        // CoreException → 409 변환).
         if (coupon != null) {
             coupon.issue.use(actor = coupon.actorId, reservationId = saved.id, now = now)
-            couponIssueRepository.save(coupon.issue)
+            try {
+                couponIssueRepository.save(coupon.issue)
+            } catch (e: OptimisticLockingFailureException) {
+                throw CoreException(ErrorType.CONFLICT, "이미 사용된 쿠폰입니다.", cause = e)
+            } catch (e: DataIntegrityViolationException) {
+                // used_reservation_id UNIQUE 위반 — 다른 reservation 에 이미 사용 중인 쿠폰
+                throw CoreException(ErrorType.CONFLICT, "이미 사용된 쿠폰입니다.", cause = e)
+            }
         }
 
         return ReservationInfo.from(saved)
