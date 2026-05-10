@@ -15,11 +15,14 @@ import jakarta.persistence.Enumerated
  * 기존 도메인이 sealed 패턴을 쓰지 않아 영속화 매핑 / 패턴 정합성 모두 단일 클래스 쪽이 자연스러움).
  *
  * 의미:
- * - `FIXED` — `rawValue` 가 원 단위 정액 할인 금액 (`>= 0`).
+ * - `FIXED` — `rawValue` 가 원 단위 정액 할인 금액 (`> 0`).
  * - `RATE` — `rawValue` 가 % (`1 ~ 100`).
  *
  * 도메인 가드:
- * - `FIXED` 이면 `rawValue >= 0`
+ * - `FIXED` 이면 `rawValue > 0` — 0원 정액 쿠폰은 등록 자체를 거절. (이전 라운드는 `>= 0` 이었으나
+ *   `ReservationModel` 의 *할인 금액 0 ↔ 쿠폰 박제 null* 불변식 (`CouponSnapshot`) 과 충돌 → 0원 FIXED 가
+ *   등록은 통과하지만 *예약 적용 시점* 에 `BAD_REQUEST` 로 실패하는 *지연 폭발* 패턴. 도메인 일관성을
+ *   위해 *발급 시점* 에서 거절. verify-code §6 "비즈니스 의미 0 가드" 정합.)
  * - `RATE` 이면 `1 <= rawValue <= 100` (0% 또는 음수는 의미 없음, 100% 초과는 환급 형태)
  *
  * 도메인 행동:
@@ -38,10 +41,10 @@ data class DiscountValue(
     init {
         when (type) {
             DiscountType.FIXED ->
-                if (rawValue < 0L) {
+                if (rawValue <= 0L) {
                     throw CoreException(
                         ErrorType.BAD_REQUEST,
-                        "정액 할인 금액은 0 이상이어야 합니다.",
+                        "정액 할인 금액은 1원 이상이어야 합니다.",
                     )
                 }
             DiscountType.RATE ->

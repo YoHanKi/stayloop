@@ -17,10 +17,11 @@ class DiscountValueTest {
     @DisplayName("FIXED 정액 할인")
     inner class Fixed {
 
-        @DisplayName("FIXED 의 rawValue 가 음수면 BAD_REQUEST 로 거절된다.")
-        @Test
-        fun shouldReject_whenFixedRawValueIsNegative() {
-            assertThatThrownBy { DiscountValue(type = DiscountType.FIXED, rawValue = -1L) }
+        @DisplayName("FIXED 의 rawValue 가 0 이하면 BAD_REQUEST 로 거절된다 — 0원 FIXED 는 ReservationModel 불변식과 충돌해 적용 시점 BAD_REQUEST 로 늦게 폭발하므로 등록 시점에 차단.")
+        @ParameterizedTest
+        @ValueSource(longs = [0L, -1L, -10_000L])
+        fun shouldReject_whenFixedRawValueIsZeroOrNegative(rawValue: Long) {
+            assertThatThrownBy { DiscountValue(type = DiscountType.FIXED, rawValue = rawValue) }
                 .isInstanceOf(CoreException::class.java)
                 .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
         }
