@@ -142,9 +142,15 @@ class ConcurrentMultiDateReservationTest {
                     others.incrementAndGet()
                     failures.add(e)
                 }
-            } catch (e: Exception) {
+            } catch (e: org.springframework.dao.PessimisticLockingFailureException) {
+                // NOWAIT 합류 시 LockTimeoutException 흡수 — 카테고리 한정.
                 conflicts.incrementAndGet()
                 failures.add(e)
+            } catch (e: Exception) {
+                // 그 외 raw 예외는 회귀 신호 — others 로 분리 (verify-code §0-B CE-3 / §11).
+                others.incrementAndGet()
+                failures.add(e)
+                System.err.println("workerA raw exception: ${e::class.simpleName}: ${e.message}")
             } finally {
                 done.countDown()
             }
@@ -162,14 +168,22 @@ class ConcurrentMultiDateReservationTest {
                     others.incrementAndGet()
                     failures.add(e)
                 }
-            } catch (e: Exception) {
+            } catch (e: org.springframework.dao.PessimisticLockingFailureException) {
+                // NOWAIT 합류 시 LockTimeoutException 흡수 — 카테고리 한정.
                 conflicts.incrementAndGet()
                 failures.add(e)
+            } catch (e: Exception) {
+                // 그 외 raw 예외는 회귀 신호 — others 로 분리 (verify-code §0-B CE-3 / §11).
+                others.incrementAndGet()
+                failures.add(e)
+                System.err.println("workerB raw exception: ${e::class.simpleName}: ${e.message}")
             } finally {
                 done.countDown()
             }
         }
-        ready.await(5, TimeUnit.SECONDS)
+        check(ready.await(5, TimeUnit.SECONDS)) {
+            "ready latch 가 5초 안에 두 워커 모두 도달하지 못했습니다 — 동시 출발 전제 깨짐 (데드락/부분차감 회귀 미발동)."
+        }
         start.countDown()
         // 데드락 회피 회귀 가드 — date ASC 락 순서가 깨지면 두 thread 가 cycle 로 hang.
         check(done.await(30, TimeUnit.SECONDS)) {

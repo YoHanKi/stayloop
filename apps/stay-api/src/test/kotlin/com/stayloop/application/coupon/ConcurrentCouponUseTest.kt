@@ -203,7 +203,9 @@ class ConcurrentCouponUseTest {
                 }
             }
         }
-        ready.await(5, TimeUnit.SECONDS)
+        check(ready.await(5, TimeUnit.SECONDS)) {
+            "ready latch 가 5초 안에 모두 도달하지 못했습니다 — 동시 쿠폰 사용 경쟁 전제 깨짐 (verify-code §9 latch 동기화 정합)."
+        }
         start.countDown()
         check(done.await(30, TimeUnit.SECONDS)) { "동시 쿠폰 사용 흐름이 30초 안에 완료되지 않았습니다." }
         executor.shutdown()

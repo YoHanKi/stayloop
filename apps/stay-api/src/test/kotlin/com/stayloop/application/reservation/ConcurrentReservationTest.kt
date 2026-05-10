@@ -126,19 +126,28 @@ class ConcurrentReservationTest {
                         others.incrementAndGet()
                         failures.add(e)
                     }
-                } catch (e: Exception) {
-                    // 본 라운드는 default `innodb_lock_wait_timeout` 의존 — 첫 스레드가 차감/커밋 후 후속 스레드는
-                    // 락 획득 시점에 가용 0 → `reserveOne()` 의 CONFLICT 로 거절 (위 CoreException 분기로 흡수).
-                    // 향후 NOWAIT 합류 (`db-lock-low-level.md` LQ3) 시 LockTimeoutException → Spring 의
-                    // PessimisticLockingFailureException 도 발동 가능 — 본 분기가 미래 회귀까지 함께 흡수.
+                } catch (e: org.springframework.dao.PessimisticLockingFailureException) {
+                    // NOWAIT 합류 (`db-lock-low-level.md` LQ3) 시 LockTimeoutException 이 Spring 의
+                    // PessimisticLockingFailureException 으로 변환되어 발동. 본 라운드는 default
+                    // `innodb_lock_wait_timeout` 의존이라 정상 흐름은 위의 CoreException(CONFLICT) 분기로
+                    // 흡수되지만, 미래 회귀까지 함께 흡수하기 위해 *카테고리 한정* 으로 conflicts 분류.
                     conflicts.incrementAndGet()
                     failures.add(e)
+                } catch (e: Exception) {
+                    // 그 외 예외 (NPE / AssertionError / DB 설정 / Spring 컨텍스트 등) 는 회귀 신호 —
+                    // others 로 분리해 최종 어설션이 *0건* 을 강제 (verify-code §0-B CE-3 / §11 의 catch 너비
+                    // 룰 정합 — Copilot #4 PR9 라운드).
+                    others.incrementAndGet()
+                    failures.add(e)
+                    System.err.println("worker raw exception: ${e::class.simpleName}: ${e.message}")
                 } finally {
                     done.countDown()
                 }
             }
         }
-        ready.await(5, TimeUnit.SECONDS)
+        check(ready.await(5, TimeUnit.SECONDS)) {
+            "ready latch 가 5초 안에 모두 도달하지 못했습니다 — 동시 출발 전제 깨짐 (verify-code §9 latch 동기화 정합)."
+        }
         start.countDown()
         check(done.await(30, TimeUnit.SECONDS)) { "동시 예약 흐름이 30초 안에 완료되지 않았습니다." }
         executor.shutdown()
