@@ -653,3 +653,185 @@ assertThat(others.get())
 2. **다회 trial 분포 측정 미진행** — 본 측정은 1 trial 단일 — Phase 0 E-2 / E-3-r1 의 영구 한계와 동일 패턴. 5주차+ 부하 라운드에서 N 회 반복 측정 합류 권장.
 3. **공통 베이스 클래스 추출 미시점** — `ConcurrentReservationTest` (Phase A) + `ConcurrentCouponUseTest` (Phase B) 가 *동일 패턴* (`@SpringBootTest` + `@Import(MySqlTestContainersConfig)` + `CountDownLatch` + `Executors.newFixedThreadPool` + `databaseCleanUp.truncateAllTables()`) 으로 n=2. Phase C 의 `ConcurrentWishToggleTest` (n=3) 가 합류하면 `AbstractConcurrencyE2ETest` 추출 검토 (verify-code §14 DRY).
 4. **모바일 30s timeout < `innodb_lock_wait_timeout` 50s** 의 다층 정합 깨짐 — Phase A 박제 그대로 누적 (5주차+ NOWAIT 합류 시점에 해소).
+
+---
+
+# 4주차 ③ Phase C — Property.wishCount Atomic UPDATE 합류 실측 + 결정 박제 (2026-05-10 완료)
+
+> **목적**. Phase 0 의 *비교 측정* (E-7 / E-7-r1 — `@Modifying @Query` + `@Version` 누락의 silent stale) 박제 위에서 *실 합류* 의 의미론 검증을 git-추적 SSOT 으로 박제. Property 는 `@Version` 미보유 아키텍처라 R6 영향 비해당 — 본 phase 는 *atomic UPDATE 의 race window 0* + *음수 진입 SQL 차단* + *운영-테스트 동치* 의 세 축을 검증.
+>
+> **연결된 결정**. `docs/plan/week4/decision.md` D-1 #4 (Property.wishCount = Atomic UPDATE) / D-6 (QueryDSL 전면 채택 → `@Modifying @Query` 대신 `JPAQueryFactory.update().execute()`).
+>
+> **실행 환경**. 2026-05-10, Docker Desktop 27.3.1 / Testcontainers 1.20.6 / MySQL 8.0.45 (`transaction_isolation=REPEATABLE-READ`) / HikariCP `maximumPoolSize=10, connectionTimeout=3s` (test profile) / Java 17.0.14 / Spring Boot 3.4.4 / Hibernate ORM 6.6.x / Windows 11.
+
+## C-Result-1. QueryDSL `update().execute()` 의 SQL 박제 — `@Modifying @Query` 대체 (D-6 정합)
+
+### 배경
+- decision.md D-1 #4 의 *Atomic UPDATE 채택* 시 plan 명시 SQL 은 `@Modifying @Query("UPDATE properties SET wish_count = wish_count + 1 WHERE id = ?1")`. 그러나 D-6 (QueryDSL 전면 채택) 정합으로 *모든* `@Query` → QueryDSL 전환 정책 (commit `24ba00b` 기 적용).
+- 본 합류는 `JPAQueryFactory.update(p).set(p.wishCount, p.wishCount.add(1)).where(p.id.eq(propertyId)).execute()` — type-safe 경로 + 컴파일 시점 컬럼 오타 차단.
+
+### 실측 raw — Hibernate SQL 로그 (`ConcurrentWishToggleTest`)
+
+테스트 실행 시 발행된 SQL (`apps/stay-api/build/test-results/test/TEST-com.stayloop.application.wishlist.ConcurrentWishToggleTest.xml` 발췌):
+
+```sql
+update properties pm1_0 set wish_count=(pm1_0.wish_count+?) where pm1_0.id=?
+```
+
+→ QueryDSL 의 `add(N)` / `subtract(N)` 모두 *동일 prepared statement template* (`wish_count + ?`) 으로 컴파일됨. 파라미터 부호 (+1 / -1) 가 증감 방향을 결정. 운영 SQL 의 *atomic 증감* 의미는 정확히 보존됨.
+
+`atomicDecrementWishCount` 의 `WHERE wish_count > 0` 가드:
+```sql
+update properties pm1_0 set wish_count=(pm1_0.wish_count+?) where pm1_0.id=? and pm1_0.wish_count>?
+```
+(decrement 흐름의 SQL — `add(-1)` + `where wishCount.gt(0)` 이 `wish_count>?` 로 부착)
+
+### 가설 ↔ 측정 정합
+
+| 가설 | 측정 |
+|---|---|
+| QueryDSL `update().execute()` 가 native SQL UPDATE 1줄 발행 — entity manager 우회 (read-modify-write 우회) | ✅ SQL 로그에서 직접 확인 (`update ... set ... where ...` 1줄, SELECT-UPDATE pair 부재) |
+| `atomicDecrementWishCount` 의 `WHERE wish_count > 0` 가드 → 음수 진입 SQL 차단 | ✅ QueryDSL DSL 의 `where(p.id.eq(...).and(p.wishCount.gt(0)))` 가 SQL 로 정확 변환 |
+| 영향 받은 행 수 (`execute().toInt()`) 반환 — Facade 가 affected = 0 (멱등 noop) / 1 (정상 갱신) 판단 | ✅ `WishlistFacade.unwish` 의 `affected == 1` 분기로 `responseCount` 계산 |
+
+### 채택 결정 — QueryDSL `update().execute()` 채택, `@Modifying @Query` 미사용
+
+- 정합 근거 (decision.md D-6): *모든 `@Query` → QueryDSL 전환* 정책. `@Modifying @Query` 의 `@Version` silent bypass (Phase 0 E-7 / Round 1 E-7-r1) 위험은 Property 가 `@Version` 미보유라 본 phase 비해당이지만, *일관성 (D-6)* 측면에서 QueryDSL 채택.
+- `kapt querydsl-apt:jakarta` 가 이미 설정되어 있어 (decision.md D-6 박제) 추가 인프라 0.
+
+### 영구 한계
+- **다회 trial 분포 측정 미진행** — Phase 0 / Phase B 와 동일 패턴 (1 trial). 5주차+ 부하 라운드에서 다회 측정.
+
+---
+
+## C-Result-2. 운영 (QueryDSL) ↔ InMemory 더블의 의미 차이 발견 + Facade 동치 박제 (verify-code §19-A)
+
+### 배경
+- C-2 의 첫 구현은 `WishlistFacade` 가 `WishlistToggleInfo(wishCount = property.wishCount + 1)` 를 응답으로 약속. 단위 테스트 (`WishlistFacadeTest.shouldIncrementWishCountOnFirstWish`) 가 **실패**.
+
+### 실측 raw — 실패 어설션
+```
+expected: 1
+actual: 2
+at WishlistFacadeTest.kt:68 — assertThat(info.wishCount).isEqualTo(1)
+```
+
+### 원인 분석 — *운영 ↔ InMemory 의미 비대칭*
+
+| 환경 | `propertyRepository.atomicIncrementWishCount(propertyId)` 의 `property` 변수 영향 |
+|---|---|
+| **운영 (QueryDSL `update().execute()`)** | entity manager *우회* — atomic UPDATE 가 DB 의 `wish_count` 를 +1 하지만, 영속성 컨텍스트의 *managed entity* 는 stale 유지. `property.wishCount` 는 호출 후에도 *호출 전 값* |
+| **InMemory (`InMemoryPropertyRepository.atomicIncrementWishCount`)** | `property.incrementWishCount()` 도메인 메서드 호출 — *같은 인스턴스* 를 mutate. `property.wishCount` 가 +1 됨 |
+
+**결과**: `property.wishCount + 1` 응답이 운영 / InMemory 에서 다른 값:
+- 운영: `0 + 1 = 1` ✓
+- InMemory: `1 + 1 = 2` ✗ (이미 +1 된 후라 +1 더 함)
+
+### 채택 결정 — `countBefore` 박제 패턴 (verify-code §19-A 운영-테스트 동치)
+
+```kotlin
+val countBefore = property.wishCount   // atomic 호출 *이전* 값을 박제
+wishlistRepository.save(...)
+propertyRepository.atomicIncrementWishCount(propertyId)
+return WishlistToggleInfo(..., wishCount = countBefore + 1)
+```
+
+운영 / InMemory 양쪽에서 동일한 결과:
+- 운영: `countBefore=0`, `0 + 1 = 1` ✓
+- InMemory: `countBefore=0`, `0 + 1 = 1` ✓ (atomic 호출이 `property.wishCount` 를 mutate 해도 *이미 박제된 countBefore* 는 0 유지)
+
+### 회귀 룰 박제 후보
+
+verify-code §19-A 운영-테스트 동치성 신규 패턴 후보:
+> *atomic UPDATE 의 InMemory 더블이 같은 인스턴스를 mutate 하면 (도메인 메서드 호출 등), Facade 응답값을 `property.wishCount + 1` 같은 *호출 후* 표현으로 작성하면 운영(stale entity) ↔ InMemory(mutated entity) 동작이 갈린다. atomic 호출 *이전* 의 값을 별도 변수로 박제 (`countBefore`) 하는 패턴으로 동치 보장.*
+
+본 패턴이 미래 라운드에서 1회 이상 추가 발견되면 (예: Aggregate 별 atomic counter 가 더 늘어날 때) verify-code §-N 으로 정식 승격.
+
+### 영구 한계
+- InMemory 더블이 entity manager 의 stale 의미를 정확히 재현하지 못함 — *clone-then-mutate* 패턴 또는 *별도 stored copy* 도입은 본 라운드 미적용 (테스트 더블의 단순성 vs 정확성 트레이드오프, Facade 의 `countBefore` 박제로 충분).
+
+---
+
+## C-Result-3. 10 스레드 무작위 토글 — wishlist row ↔ wish_count 정합성
+
+### 배경
+- ConcurrentWishToggleTest 의 시나리오: 10 스레드 (deterministic seed=42) × 같은 사용자 / 같은 숙소 / wish 또는 unwish 무작위 호출. 자연키 PK `(user_id, property_id)` UNIQUE 와 atomic UPDATE 의 race window 0 정합성을 동시 검증.
+
+### 실측 raw — 어설션 + Hibernate SQL 로그
+
+**테스트 결과** (4.148s, BUILD SUCCESSFUL):
+- `wish_count ∈ {0, 1}` ✓
+- wishlist row 존재 (`existsBy`) ↔ `wish_count` 의 1:1 대응 ✓ (둘 다 0 또는 둘 다 1)
+
+**SQL 로그 발췌**:
+```sql
+-- 동시성 흐름의 INSERT 시도 (Hibernate 는 commit 전 logged — rollback 시에도 로그 남음)
+insert into wishlists (created_at, property_id, user_id) values (?,?,?)  × 5
+
+-- atomic UPDATE 시도 (logged at execute time, rollback 시에도 SQL 라인 노출)
+update properties pm1_0 set wish_count=(pm1_0.wish_count+?) where pm1_0.id=?  × 5
+
+-- existsBy 흐름의 count(*) — 10 스레드 + 1 최종 검증
+select count(*) from wishlists wm1_0 where wm1_0.user_id=? and wm1_0.property_id=?  × 11
+
+-- DataIntegrityViolationException — wishlist UNIQUE 제약 발동 (race 한 INSERT)
+worker 8 (wish) raw: DataIntegrityViolationException: Duplicate entry '1-1' for key 'wishlists.PRIMARY'
+worker 7 (wish) raw: DataIntegrityViolationException: ...
+worker 2 (wish) raw: DataIntegrityViolationException: ...
+worker 5 (wish) raw: DataIntegrityViolationException: ...
+```
+
+**SQL 로그 해석 주의**: Hibernate 는 SQL 을 *execute 시점* 에 log 발행 — *commit 시점* 이 아님. 따라서 5 INSERT 가 log 에 노출되어도 *모두 commit 됐다는 보장은 X*. `@Transactional` rollback (UNIQUE 위반 throw 시) 으로 일부 INSERT 는 *효과가 원복* 되지만 SQL 로그는 그대로 남음. 최종 정합성 검증은 *어설션* 이 SSOT.
+
+### 가설 ↔ 측정 정합
+
+| 가설 | 측정 |
+|---|---|
+| 자연키 PK UNIQUE 가 *서로 다른 스레드의 동시 INSERT* 를 1건만 허용 — 나머지는 `DataIntegrityViolationException` | ✅ 4건의 raw 예외 (worker 7/8/2/5) — 자연키 race 의 *예상된* 거절 |
+| atomic UPDATE 가 race window 0 — `wish_count + ?` 1줄로 lost update 차단 | ✅ 어설션 `wish_count ∈ {0, 1}` 통과 (음수 진입 0, 과다 증가 0) |
+| wishlist row 존재 ↔ `wish_count = 1` 의 1:1 대응 — atomic UPDATE 가 wishlist INSERT/DELETE 와 *짝* 으로 commit | ✅ 어설션 `(if wishlistRowExists 1 else 0).isEqualTo(finalProperty.wishCount)` 통과 — 둘이 어긋나면 어딘가 atomic UPDATE 가 빠진 신호인데 0건 |
+
+### 채택 결정 — Facade 의 `DataIntegrityViolationException` *변환 미적용* (Phase C scope 밖)
+
+본 phase 는 *wishCount atomic 전환만* 다룸. wishlist UNIQUE 의 race 를 Facade 에서 catch → noop 변환은 *별도 scope*:
+- 본 라운드는 raw 예외가 클라이언트로 전파될 가능성 (멱등 시나리오에서 500 응답).
+- E2E 테스트는 `others` 카운터로 raw 예외를 *허용* 하면서 *최종 정합성* 만 검증 — KDoc 박제.
+- 5주차+ 운영 정합 라운드 또는 별도 Wishlist race 변환 PR 에서 합류.
+
+### 영구 한계
+- 분산 환경 (멀티 인스턴스) 에서는 본 atomic UPDATE 가 *DB 단위 직렬화* — Redis INCR 등 분산 카운터로 진화 시 재검토 (decision.md D-1 의 future re-check 정합).
+
+---
+
+## Phase C 의 실제 commit 3건 (git-추적)
+
+| # | hash | prefix | 메시지 | 변경 단위 |
+|---|---|---|---|---|
+| 1 | `b6b9c49` | `feat` | `PropertyRepository.atomicIncrementWishCount / atomicDecrementWishCount (QueryDSL update + 음수 진입 SQL 차단) 를 추가한다.` | `domain/property/PropertyRepository.kt` (인터페이스 + KDoc) + `infrastructure/property/PropertyRepositoryImpl.kt` (QueryDSL `update().execute()`) + `support/test/InMemoryPropertyRepository.kt` (운영-테스트 동치 의미론) + `support/test/InMemoryPropertyRepositoryAtomicTest.kt` (5건 단위 테스트) (4 files, +182) |
+| 2 | `0b9679c` | `refactor` | `WishlistFacade 가 atomic 증감을 사용하도록 전환하고 운영-InMemory 동치를 위해 countBefore 박제 흐름으로 정렬한다.` | `application/wishlist/WishlistFacade.kt` (1 file, +30/-9) — read-modify-write (`incrementWishCount + save`) 제거 + atomic 호출 + `countBefore` 박제 + KDoc 의 *마지막 방어선 / atomic 우회 / countBefore 동치* 박제 |
+| 3 | `649e014` | `feat` | `Wishlist 토글 동시 요청 E2E 테스트 (10 스레드 × 같은 숙소 wish/unwish 무작위) 를 추가한다.` | `application/wishlist/ConcurrentWishToggleTest.kt` (1 file, +210) — `@SpringBootTest` + Testcontainers MySQL + deterministic random seed=42 |
+
+**Plan 정합**: C-1 / C-2 / C-3 가 plan 명시 그대로 분리됨. C-1 의 *plan 변형*: `@Modifying @Query` 대신 QueryDSL `update().execute()` 채택 — decision.md D-6 의 *@Query 전면 제거* 정책 정합.
+
+## 검증 게이트 결과 (2026-05-10)
+
+| 게이트 | 결과 | 발견 / 메모 |
+|---|---|---|
+| `verify-code` | ✅ PASS | P0 0건 / P1 0건 / P2 1건 (운영 ↔ InMemory 동치를 Facade 의 `countBefore` 로 처리한 것은 *발견된 패턴* — 미래 1회 더 발견 시 verify-code §19-A 정식 룰 후보) |
+| `verify-architecture` | ✅ PASS | 위반 0건 — domain.property → application/infrastructure 역참조 0, QueryDSL update 가 infrastructure 한정, `@Transactional` Facade 단일 진입 (atomic UPDATE 가 그 안에서 호출) |
+| `verify-tests` | ✅ PASS | **403 tests / 0 failures / 0 errors** (BUILD SUCCESSFUL in 1m 31s), ktlintCheck PASS. 신규 6건 (InMemoryPropertyRepositoryAtomicTest 5 + ConcurrentWishToggleTest 1). InMemory 단위 테스트가 운영 SQL 의미론 (*affected = 0/1*, `WHERE wish_count > 0` 가드) 을 1:1 검증 |
+
+## week4-quests Checklist 매핑 (Phase C 시점)
+
+- [x] **Wishlist 동시성 ①** (동일 숙소 찜/찜취소 정합성) — `ConcurrentWishToggleTest` PASS (본 Phase C)
+- [x] **Inventory 동시성 ③** (동일 객실 / 동일 일자 동시 예약 시 더블부킹 X) — Phase A
+- [x] **Coupon 동시성 ②** (동일 쿠폰 다중 기기 동시 사용) — Phase B
+- [ ] **다일자 겹침 동시성 ④** — Phase D-1 으로 이연
+
+## 미해결 위험 박제 (Phase C 누적)
+
+1. **`DataIntegrityViolationException` (wishlist UNIQUE) 가 클라이언트로 전파 가능** — 본 phase scope 외 (wishCount atomic 만 다룸). 5주차+ 운영 정합 라운드 또는 별도 Wishlist race 변환 PR 에서 catch → noop 변환 합류.
+2. **운영 ↔ InMemory 의미 비대칭의 회귀 위험** — Facade 가 *명시적으로 `countBefore` 박제* 하는 패턴이 *후임이 무심코 `property.wishCount + 1` 로 회귀* 할 가능성. KDoc 박제 + 단위 테스트로 회귀 가드. 미래 동일 패턴 추가 발견 시 verify-code §19-A 정식 룰 승격.
+3. **공통 베이스 클래스 추출 시점 도달** — `ConcurrentReservationTest` (A) + `ConcurrentCouponUseTest` (B) + `ConcurrentWishToggleTest` (C) 의 n=3. Phase D-1 (다일자 겹침) 진입 시점에 `AbstractConcurrencyE2ETest` 추출 검토 (`@SpringBootTest` + `@Import(MySqlTestContainersConfig)` + `CountDownLatch` + `Executors.newFixedThreadPool` + `databaseCleanUp.truncateAllTables()` 5요소).
+4. **모바일 30s timeout < `innodb_lock_wait_timeout` 50s** — Phase A/B 박제 그대로 누적 (5주차+ NOWAIT 합류 시점에 해소).
+5. **다회 trial 분포 측정 미진행** — Phase 0 / A / B 와 동일 패턴 영구 한계.
