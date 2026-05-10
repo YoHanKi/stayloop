@@ -194,35 +194,50 @@ class ConcurrentMultiDateReservationTest {
             .withFailMessage("CONFLICT 외 도메인 예외 발생: others=%d, sample:\n  %s", others.get(), sample)
             .isZero()
 
-        // **부분 차감 0 검증** — 성공한 reservation 의 *모든* 일자가 reserved=1, 실패한 reservation 의 *unique* 일자는
-        // 영향 없음. 5주차+ 결제 라운드까지 사용자 약정의 핵심 회귀 가드.
-        val reservedByDate = allDates.associateWith { date ->
-            inventories.findById(roomType.id, date)?.reservedRooms
+        // **부분 차감 0 검증** — 성공한 reservation 의 *모든* 일자가 reserved=1, 실패한 reservation 의 *unique*
+        // 일자는 영향 없음. 5주차+ 결제 라운드까지 사용자 약정의 핵심 회귀 가드.
+        // *각 일자 inventory 는 *한 번만 조회* — verify-code §14 DRY (재조회 회피).
+        val inventoryByDate = allDates.associateWith { date ->
+            inventories.findById(roomType.id, date)
                 ?: error("inventory 가 누락되었습니다 (date=$date)")
         }
-        // 6/11, 6/12 는 어느 쪽이 성공하든 reserved=1 (둘 다 5/11, 5/12 사용)
-        assertThat(reservedByDate[LocalDate.of(2026, 6, 11)])
-            .withFailMessage("6/11 reserved 가 1 이 아님: %d (성공=A:%d/B:%d)", reservedByDate[LocalDate.of(2026, 6, 11)], successesA.get(), successesB.get())
+        // 6/11, 6/12 는 어느 쪽이 성공하든 reserved=1 (둘 다 사용)
+        assertThat(inventoryByDate.getValue(LocalDate.of(2026, 6, 11)).reservedRooms)
+            .withFailMessage(
+                "6/11 reserved 가 1 이 아님: %d (성공=A:%d/B:%d)",
+                inventoryByDate.getValue(LocalDate.of(2026, 6, 11)).reservedRooms,
+                successesA.get(),
+                successesB.get(),
+            )
             .isEqualTo(1)
-        assertThat(reservedByDate[LocalDate.of(2026, 6, 12)])
-            .withFailMessage("6/12 reserved 가 1 이 아님: %d (성공=A:%d/B:%d)", reservedByDate[LocalDate.of(2026, 6, 12)], successesA.get(), successesB.get())
+        assertThat(inventoryByDate.getValue(LocalDate.of(2026, 6, 12)).reservedRooms)
+            .withFailMessage(
+                "6/12 reserved 가 1 이 아님: %d (성공=A:%d/B:%d)",
+                inventoryByDate.getValue(LocalDate.of(2026, 6, 12)).reservedRooms,
+                successesA.get(),
+                successesB.get(),
+            )
             .isEqualTo(1)
         // 6/10 은 A 성공 시 reserved=1 (A 의 unique 일자), B 성공 시 reserved=0 (B 가 6/10 사용 안 함)
         val expectedDate10 = if (successesA.get() == 1) 1 else 0
-        assertThat(reservedByDate[LocalDate.of(2026, 6, 10)])
+        assertThat(inventoryByDate.getValue(LocalDate.of(2026, 6, 10)).reservedRooms)
             .withFailMessage(
                 "6/10 reserved 정합 깨짐: actual=%d, expected=%d (A 성공 시 1, B 성공 시 0). 성공=A:%d/B:%d",
-                reservedByDate[LocalDate.of(2026, 6, 10)],
+                inventoryByDate.getValue(LocalDate.of(2026, 6, 10)).reservedRooms,
                 expectedDate10,
                 successesA.get(),
                 successesB.get(),
             )
             .isEqualTo(expectedDate10)
         // **음수 진입 / 더블부킹 0** — 어떤 일자도 reserved > total 이 안 됨
-        allDates.forEach { date ->
-            val inventory = inventories.findById(roomType.id, date)!!
+        inventoryByDate.forEach { (date, inventory) ->
             assertThat(inventory.reservedRooms)
-                .withFailMessage("date=%s 더블부킹: reserved=%d > total=%d", date, inventory.reservedRooms, inventory.totalRooms)
+                .withFailMessage(
+                    "date=%s 더블부킹: reserved=%d > total=%d",
+                    date,
+                    inventory.reservedRooms,
+                    inventory.totalRooms,
+                )
                 .isLessThanOrEqualTo(inventory.totalRooms)
         }
     }
