@@ -301,8 +301,20 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 | `@Async` 메서드가 트랜잭션 컨텍스트 전파 가정 | 트랜잭션 끊김 |
 | 컬렉션 순회 중 변경 (`ConcurrentModificationException` 위험) | `for (x in list) list.remove(x)` |
 | 단일 스레드 가정의 카운터를 production 으로 그대로 가져감 | `wishCount += 1` race |
+| **다일자 (다중 row) 비관적 락 시 `ORDER BY` 미명시** — 락 획득 순서가 비결정적이면 두 트랜잭션이 *서로 다른 순서* 로 잡으면서 cycle / 데드락 발생 | `findInventoriesForUpdate(roomTypeId, dates)` 의 SQL 이 `WHERE date IN (?, ?, ...) FOR UPDATE` 만 있고 `ORDER BY date ASC` 누락 — 두 thread 가 dates `[5/10, 5/11]` ↔ `[5/11, 5/10]` 순서로 락 시도 → InnoDB cycle 검출 → 한쪽 deadlock victim. **락 순서를 SQL 과 *진입점 (Facade)* 양쪽에 명시** — Facade 가 `period.datesToReserve().sorted()` 로 호출하고 SQL 도 `ORDER BY date ASC` 박제. 둘 중 한쪽만 있으면 *문서 ↔ 가드 정합* 깨짐 (§19-B 와 한 쌍). |
+| **운영 atomic UPDATE 의 InMemory 더블이 *같은 인스턴스* 를 mutate** — Facade 응답값을 `entity.field + 1` 형태로 작성 시 운영(stale entity) ↔ InMemory(mutated entity) 응답이 갈림 | `WishlistFacade.wish` 가 `WishlistToggleInfo(wishCount = property.wishCount + 1)` — 운영(QueryDSL `update().execute()`) 은 entity manager 우회로 `property.wishCount` stale 유지, InMemory 의 `atomicIncrementWishCount` 가 도메인 메서드로 인스턴스 mutate. 결과: 운영 1 / InMemory 2. **atomic 호출 *이전* 의 값을 별도 변수로 박제** (`countBefore`) 하는 패턴이 정합 — verify-code §19-A 운영-테스트 동치. |
 
-**가드**: 본 라운드(2~3주차)는 단일 스레드 가정 — 다만 **4주차에서 락/원자 연산이 들어올 자리** 를 본 라운드 코드가 이미 막지 않게 한다 (예: 카운터 갱신을 모델 메서드로 캡슐화).
+**가드**:
+- 본 라운드(2~3주차)는 단일 스레드 가정 — 다만 **4주차에서 락/원자 연산이 들어올 자리** 를 본 라운드 코드가 이미 막지 않게 한다 (예: 카운터 갱신을 모델 메서드로 캡슐화).
+- **다일자 락 ORDER BY 강제** (4주차 ③ Phase A/D 학습): Facade `@Transactional` 안에서 다중 row 비관적 락을 잡을 때, *SQL 의 ORDER BY 정렬* 과 *Facade 진입점의 입력 정렬* 둘 다 명시. 한쪽만 있으면 문서 거짓말 또는 Hibernate Optimization 으로 정렬이 사라질 위험.
+
+**점검 명령**:
+```
+Grep "@Lock\\(LockModeType\\.PESSIMISTIC_WRITE" path=apps/.../main → 모든 비관적 락 메서드
+Grep "setLockMode\\(.*PESSIMISTIC" path=apps/.../main → QueryDSL 비관적 락
+→ 각 메서드의 SQL 또는 QueryDSL 빌더에 `orderBy(...)` 가 있는지 확인
+→ Facade 호출 측에 `.sorted()` 또는 동등한 정렬 보장이 있는지 확인
+```
 
 ---
 
@@ -350,6 +362,7 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 | **로그에 raw payload 를 무제한 노출** (`log.warn("...dbData='{}'", dbData, e)`) | 길이/PII/시크릿 누설 — 로그 부피·보안 양쪽 함정 |
 | **KDoc `@property` vs `@param` 혼동** | `val/var` 없는 생성자 매개변수에 `@property` 를 적으면 IDE 가 link 를 못 찾고 문서가 거짓말. property 만 `@property`, 단순 매개변수는 `@param` |
 | **`CoreException` 의 `customMessage` 에 외부 식별자(LoginId / email / userId / 토큰 ID 등) 를 직접 박음** | `ApiControllerAdvice` 가 `customMessage` 를 응답으로 흘리므로 식별자가 클라이언트에 노출. 계정 enumeration / 식별자 추적 위험. `"사용자가 존재하지 않습니다: ${userId.value}"` 형태는 P1 보안 결함 |
+| **JPA 예외 (`OptimisticLockingFailureException` / `DataIntegrityViolationException` / `LockTimeoutException` / `PessimisticLockingFailureException`) 가 도메인 메시지로 *그대로* 노출** | Facade 가 catch 하지 않고 throw 가 layer 를 뚫고 ApiControllerAdvice 에 도달하면, 응답 메시지가 *Hibernate / Spring 내부 텍스트* (`"could not execute statement [Duplicate entry '1-1' for key 'wishlists.PRIMARY']"` 등) 로 직행. (a) 식별자 노출 (PK 컬럼 / row 값), (b) 도메인 의미 부재 (사용자가 *왜* 실패했는지 모름), (c) ApiControllerAdvice 매핑 불일치 (500 응답). **Facade 의 `try { repo.save(...) } catch (e: OptimisticLockingFailureException) { throw CoreException(CONFLICT, "이미 사용된 쿠폰입니다.", cause = e) }`** 패턴으로 일반화 + cause 보존 (4주차 ③ Phase B 학습). |
 
 **가드**:
 - **`CoreException(errorType, customMessage, cause)` 시그니처를 항상 사용** — `cause` 로 원인 보존.
@@ -358,6 +371,7 @@ null / 빈 입력이 **조용히** 정상 값으로 변환되어 버그를 늦�
 - **read 측이 try/catch 라면 write 측도 동일 정책으로 감싼다** — Jackson 의 `writeValueAsString` 도 `JsonProcessingException` 을 던질 수 있다. 한 컨버터 안에서 한 쪽만 감싸면 비대칭 (Copilot 3차 가드).
 - **로그에 들어가는 raw payload 는 길이 + 프리뷰만**. 예: `log.warn("X 역직렬화 실패. length={}, preview='{}'", dbData.length, dbData.take(80), e)`. PREVIEW_LIMIT 은 `private const`.
 - **`CoreException(ErrorType.X, customMessage)` 의 `customMessage` 는 *클라이언트 응답으로 직행* 한다** — `ApiControllerAdvice` 가 그대로 `ErrorResponse.message` 로 흘림. 따라서 식별자(LoginId / email / userId / reservationId / token) 를 메시지에 박지 않는다. 메시지는 `"사용자가 존재하지 않습니다."` 처럼 일반화하고, 식별자는 별도로 `log.warn("user not found loginId={}", loginId.value)` 로 서버 로그에만 남긴다. 운영-테스트 동치를 위해 InMemory 더블의 메시지도 동일 정책 (§19-A).
+- **JPA 예외 → CoreException 변환은 Facade 책임** (4주차 ③ Phase B 박제): 도메인 / Repository 가 throw 한 raw JPA 예외 (`OptimisticLockingFailureException`, `DataIntegrityViolationException`, `LockTimeoutException`, `PessimisticLockingFailureException` 등) 는 *Application Layer 의 Facade try/catch* 에서 `CoreException(ErrorType.CONFLICT, "<도메인 메시지>", cause = e)` 로 변환. 같은 도메인 사고 (예: "이미 사용된 쿠폰") 가 여러 JPA 예외 경로 (낙관적 락 vs UNIQUE) 로 발생할 수 있으면 두 catch 블록의 *throw 메시지를 동일* 하게 — 클라이언트 응답이 일관되게 보이고, cause 의 분기 정보로 운영 디버깅은 가능.
 
 ```kotlin
 override fun convertToDatabaseColumn(attribute: T?): String {
@@ -435,8 +449,19 @@ override fun convertToEntityAttribute(dbData: String?): T {
 | `@Transactional` 메서드가 같은 클래스의 다른 메서드 호출 (self-invocation) | TX 적용 안됨 |
 | Lazy 컬렉션을 트랜잭션 밖에서 접근 | LazyInitializationException |
 | `flush()` / `clear()` 직접 호출 | 영속성 컨텍스트 의도 깨짐 |
+| **`@Lock(PESSIMISTIC_WRITE)` / `setLockMode(PESSIMISTIC_WRITE)` 메서드를 *트랜잭션 밖* 에서 호출** | Facade `@Transactional` 누락 또는 *별도 메서드의 `@Transactional` 가 없는 호출자* 가 직접 호출 → 락이 statement 종료 즉시 해제 → 후속 read-modify-write 가 race window 노출. 비관적 락의 *목적 자체가 무력화*. **반드시 Facade `@Transactional` 안에서만 호출** — 도메인 서비스 / Repository 내부에서 직접 호출 X. |
+| **`saveAndFlush` 가 호출 시점 throw 의미를 약속하는데 `@Transactional` 밖에서 호출** | Facade 가 `@Transactional` 누락 시 `saveAndFlush` 가 *자체 TX* 로 commit → `@Version` 충돌은 *commit 시점* 에 throw. Facade try/catch 가 잡지 못함. **`saveAndFlush` 도 비관적 락과 동일하게 Facade `@Transactional` 안에서만 의미 있음** — 호출 시점 throw 의 의미 계약이 TX 경계에 의존. |
 
-**가드**: `@Transactional` = Facade 한 곳. Lazy 컬렉션은 Facade 내부에서만 접근.
+**가드**:
+- `@Transactional` = Facade 한 곳. Lazy 컬렉션은 Facade 내부에서만 접근.
+- **비관적 락 / saveAndFlush 의 트랜잭션 의무 명시**: 도메인 Repository 인터페이스 KDoc 에 *"본 메서드는 `@Transactional` 안에서만 호출되어야 한다"* 박제. 호출자가 무심코 `@Transactional` 누락 시 *문서 거짓말* 검출 (§19-B 와 한 쌍).
+
+**점검 명령**:
+```
+Grep "@Lock\\(LockModeType\\.PESSIMISTIC|setLockMode\\(.*PESSIMISTIC|saveAndFlush" path=apps/.../main → 모든 비관적 락 / saveAndFlush 호출
+→ 각 호출 측 메서드를 추적해 *진입점 (Facade)* 의 `@Transactional` 어노테이션 확인
+→ KDoc 의 "@Transactional 안에서만" 약속 ↔ 실제 호출자의 가드 정합
+```
 
 ---
 
@@ -741,8 +766,11 @@ P0 위반 1건도 FAIL. P1 / P2 는 누적 정도와 영향 범위로 판단.
 6. **부수효과 이전 cheap input guard 누락** — 외부 자원 mutation (`reserveOne()` / `releaseOne()` / `save()`) 이전에 `> 0` / `not blank` 같은 비싸지 않은 검증을 끝내지 않으면 부분 변경 시점이 발생 P1. Strong Exception Safety 의 service-level 강화.
 7. **외부 주입 컬렉션 ↔ Aggregate 식별자 가드 부재** (`cancel(reservation, inventories)` 등) — 호출자 실수로 다른 자원을 mutate 하는 정합성 오류 P1. mutate 이전 가드 + 단위 테스트로 회귀 방지.
 8. **`set(A) == set(B)` 단독 비교의 중복 사각지대** — list 의 1:1 매칭이 본질이면 `size + set` 페어 P1.
+9. **다일자 (다중 row) 비관적 락 의 `ORDER BY` 미명시** — 락 획득 순서 비결정 → 데드락 P1. SQL `ORDER BY date ASC` + Facade 진입점 `.sorted()` 양쪽 명시.
+10. **JPA 예외 (`OptimisticLockingFailureException` / `DataIntegrityViolationException`) 가 클라이언트 응답으로 노출** — 식별자 노출 + 도메인 의미 부재 P1. Facade try/catch 로 `CoreException(CONFLICT, ..., cause = e)` 변환.
+11. **`@Lock(PESSIMISTIC_WRITE)` / `saveAndFlush` 가 `@Transactional` 밖에서 호출** — 락 즉시 해제 / 호출 시점 throw 의미 깨짐 P1. Facade `@Transactional` 안에서만 호출 + Repository 인터페이스 KDoc 박제.
 
-위 8가지를 P2 로 보류하려면 **명시적 사유** ("4주차 동시성 영역", "별도 인프라 라운드" 같은 *일반화 가능한 이유*) 가 PR 본문에 박혀야 한다. "본 PR scope 외" 같은 모호한 사유로 미루면 다음 라운드에 외부 리뷰로 다시 잡힘.
+위 11가지를 P2 로 보류하려면 **명시적 사유** ("4주차 동시성 영역", "별도 인프라 라운드" 같은 *일반화 가능한 이유*) 가 PR 본문에 박혀야 한다. "본 PR scope 외" 같은 모호한 사유로 미루면 다음 라운드에 외부 리뷰로 다시 잡힘.
 
 ---
 
