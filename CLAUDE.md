@@ -29,9 +29,28 @@ Stayloop — Spring Boot 3 + Kotlin 멀티모듈 숙박 예약 백엔드.
 
 | 스킬 | 용도 | 호출 시점 |
 |---|---|---|
+| `create-plan` | 주차 plan 의 *사고 경로 SSOT* `docs/plan/week{n}-b.md` (Loop-driven, 막연함 → 부딪힘 → 고민 → 결과) 작성. 짝 closed plan (`docs/plan/week{n}.md`) 와의 매핑 검증. 정형 예시 = `docs/plan/week5-b.md`. | **새 주차 진입 직전 / 기존 closed plan 의 짝 b.md 보완 시 명시 호출.** 자동 게이트 X. |
 | `create-pr` | 브랜치 컨벤션·커밋 prefix·`documents/feature/{topic}/pr.md` 골격·푸시·PR URL 산출 보조 | **사용자가 "PR 만들어줘" 등으로 명시적으로 요청할 때만 호출.** 자동 게이트로 사용하지 않는다. |
 | `record-decision` | 주차 plan 진행 중 내려진 *주요 의사결정* (대안 비교 / 선택 / 근거 / 트레이드오프) 을 `docs/plan/week{n}/decision.md` 에 누적 박제. | **사용자가 "결정 기록해줘" / "박제해줘" 등으로 명시적으로 요청할 때만 호출.** 자동 게이트 X. |
 | `experiment-recurse` | Testcontainers / k6 실험 결과 박제를 **재귀로 (최소 1회, 최대 3회)** 검토 — 가설 ↔ 측정 사이의 환경 / 시나리오 / 도구 의미론 / 라벨링 / 해석 / 통계적 유의성 / 가설 자체 의 7 축 허점 분류 (a 즉시 수정 / b 재실험 / c 영구 한계). | **실험 박제 작성 직후 *최소 1회*. 사용자가 "실험 검토해줘" / "허점 찾아줘" 등으로 명시 호출.** 자동 게이트 X. |
+
+## Plan 구조 (주차)
+
+주차 plan 은 **두 짝 문서** 로 구성한다 — 정형 예시는 `docs/plan/week5-b.md` + `docs/plan/week5.md`:
+
+| 문서 | 위상 | SSOT 영역 | 작성 시점 |
+|---|---|---|---|
+| `docs/plan/week{n}-b.md` | *Loop-driven* (사고 경로) | *어떻게 발견했는가* — 막연함 → 시도 → 부딪힘 → 고민 → 결과 → ➡️ 매핑 | 주차 진입 직전 ~ Loop 발견 시점마다 누적 |
+| `docs/plan/week{n}.md` | *Closed* (결과) | *무엇을 할 것인가* — PR / Phase / 박제 형식 / 반증 가드 임계 | b.md 의 Loop 결과가 *형식* 으로 굳을 때 |
+| `docs/plan/week{n}/decision.md` | *Decision log* | *왜 그렇게 결정했는가* — 대안 비교 / 트레이드오프 / 미래 재검토 | 주요 결정 시점마다 누적 (`record-decision`) |
+
+**규약**:
+- b.md 의 어떤 Loop 도 closed plan 의 *PR / D-N / Phase* 에 매핑된다. 매핑이 깨지면 *b.md 가 허공* 이거나 *closed plan 미갱신*.
+- b.md 는 *추가 사실을 박지 않는다* — closed plan 이 내용 SSOT, b.md 는 경로 박제.
+- b.md 의 본문 Loop 는 *발견 시점의 박제* — 후행 변경 금지 (closed plan 갱신 시에도 매핑 표만 갱신).
+- 주차 종결 시 두 문서 모두 read-only.
+
+**작성 흐름**: `create-plan` (b.md 작성) → 사용자 / 별도 작업 (closed plan 작성) → `record-decision` (결정 박제, 누적).
 
 ## 실험 테스트 (Experiment Tests)
 
