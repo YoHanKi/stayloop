@@ -2,6 +2,8 @@ package com.stayloop.domain.property
 
 import com.stayloop.domain.common.value.PageQuery
 import com.stayloop.domain.common.value.PageResult
+import com.stayloop.domain.property.value.PropertySortKey
+import com.stayloop.domain.reservation.value.StayPeriod
 
 interface PropertyRepository {
     fun save(property: PropertyModel): PropertyModel
@@ -9,10 +11,29 @@ interface PropertyRepository {
     fun findById(id: Long): PropertyModel?
 
     /**
-     * 도시 코드로 페이징 조회. 정렬은 `query.sort` 의 도메인 어휘 (`wishCount`, `rating`, `name` 등)를
-     * RepositoryImpl 가 인프라 정렬 키로 매핑한다.
+     * 도시 + 기간 + 정렬 키 기준 Property 페이지 조회. (week5 PR1 D-6 4종 활성화)
+     *
+     * **`sortKey` 별 SQL 의미론** (`docs/plan/week5.md` D-1 + D-6):
+     * - [PropertySortKey.RECOMMENDED] — `properties` 의 `id ASC` (기본). `idx_properties_city` prefix scan.
+     * - [PropertySortKey.WISHES_DESC] — `properties.wish_count DESC`. V010 의 `idx_properties_city_wish_count`
+     *   prefix scan (filesort 없음).
+     * - [PropertySortKey.RATING_DESC] — `properties.rating DESC`. V010 의 `idx_properties_city_rating` 동일.
+     * - [PropertySortKey.PRICE_ASC] — *`daily_room_rates` JOIN GROUP BY MIN*. period 의 일자 범위 안에서
+     *   각 Property 의 *RoomType × date 의 최저 per-night price* 로 정렬. *K = page.size × 3 candidate
+     *   overfetch* — Facade 가 후속 가용성 N+1 필터 후 page.size 만큼 take (week5-b.md L3 / decompose-decision
+     *   Q1~Q5 박제). 본 sort 만 PageResult.content 가 page.size 보다 클 수 있다 (최대 size×3).
+     *
+     * **`period` 사용** — PRICE_ASC 만 사용. 다른 sort 는 무시 (호출자 정합성을 위해 항상 전달).
+     *
+     * **`page.total`** — 모든 sort 에서 *city 매칭 row 수* (가용성 제외 X). AC-1 정합 — PRICE_ASC 의 후속
+     * 가용성 필터는 Facade 가 응답값에서 처리하지만, total 의 의미는 *도시 매칭 count* 로 유지 (다른 sort 와 일관).
      */
-    fun findByCity(city: String, query: PageQuery): PageResult<PropertyModel>
+    fun search(
+        city: String,
+        period: StayPeriod,
+        sortKey: PropertySortKey,
+        page: PageQuery,
+    ): PageResult<PropertyModel>
 
     fun findAllByIds(ids: Collection<Long>): List<PropertyModel>
 
