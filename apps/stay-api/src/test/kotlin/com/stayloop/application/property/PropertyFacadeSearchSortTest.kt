@@ -197,7 +197,7 @@ class PropertyFacadeSearchSortTest {
         }
     }
 
-    @DisplayName("RECOMMENDED 정렬 — id ASC 순서 (저장 순) + EXPLAIN 이 idx_properties_city 또는 PK 사용.")
+    @DisplayName("RECOMMENDED 정렬 — id ASC 순서 (저장 순) + EXPLAIN 이 idx_properties_city 또는 PRIMARY 사용 (D-7).")
     @Test
     fun recommendedSortReturnsByIdAsc() {
         val first = seedProperty(name = "first", wishCount = 1)
@@ -217,6 +217,21 @@ class PropertyFacadeSearchSortTest {
 
         // id ASC = 저장 순서 = first, second, third
         assertThat(result.content.map { it.propertyId }).containsExactly(first.id, second.id, third.id)
+
+        // EXPLAIN — D-7 회귀 가드. RECOMMENDED 는 properties 단일 테이블 + ORDER BY id ASC. 옵티마이저 후보:
+        // (a) idx_properties_city prefix scan (covering) — 일반적 선택
+        // (b) PRIMARY (PK clustered index) range/index scan — 모수에 따른 fallback
+        // 둘 중 하나여야 한다. filesort 는 없어야 — id 는 PK 라 정렬 자체가 인덱스 순서로 가능.
+        val explain = explain(
+            """
+            SELECT id FROM properties WHERE city = ? ORDER BY id ASC LIMIT 20
+            """.trimIndent(),
+            city,
+        )
+        assertThat(explain).anySatisfy { row ->
+            assertThat(row["key"] as String?).isIn("idx_properties_city", "PRIMARY")
+            assertThat(row["Extra"] as String?).doesNotContainIgnoringCase("Using filesort")
+        }
     }
 
     private fun explain(sql: String, vararg args: Any): List<Map<String, Any?>> =

@@ -16,6 +16,13 @@ import com.stayloop.support.error.ErrorType
  * **PRICE_ASC cross-repo 협조** — 운영 SQL 의 `JOIN room_types JOIN daily_room_rates` 를 InMemory 가
  * 재현하려면 `RoomTypeRepository` + `DailyRoomRateRepository` 의 store 에 접근해야 한다. 생성자 옵션 인자로
  * 주입 받고, 미주입 상태에서 PRICE_ASC 호출 시 명시적 예외 — *조용한 잘못된 결과* 보다 *명시적 실패* 우선.
+ *
+ * **PRICE_ASC race window 한계** — 운영 RepositoryImpl 의 PRICE_ASC 는 *2 round-trip* (sortedIds fetch →
+ * findAllById). 두 round-trip 사이에 다른 thread 가 Property 를 삭제하면 byId[id] = null 로 결과에서 누락되어
+ * *page.size 미달* 발생. 본 InMemory 는 *1-pass in-memory filter* 라 race window 0 — 운영보다 *더 안전하게*
+ * 동작한다. 결과: *운영의 race window* 가 단위 테스트에 안 잡힘 (verify-code R9 — InMemory 동시성 시뮬레이션
+ * 본질적 한계). 운영의 race 영역은 Testcontainers + 부하 테스트에서 검증. PR3 projection 1쿼리 합류 시 race
+ * window 자체가 사라지므로 본 한계도 함께 회수 (`docs/plan/week5.md` D-3).
  */
 class InMemoryPropertyRepository(
     private val roomTypeStore: InMemoryRoomTypeRepository? = null,
