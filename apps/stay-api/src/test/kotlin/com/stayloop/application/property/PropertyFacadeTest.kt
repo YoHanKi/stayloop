@@ -1,8 +1,8 @@
 package com.stayloop.application.property
 
 import com.stayloop.application.property.command.PropertySearchCriteria
-import com.stayloop.application.property.command.PropertySortKey
 import com.stayloop.application.property.command.RoomAvailabilityQuery
+import com.stayloop.domain.property.value.PropertySortKey
 import com.stayloop.domain.common.value.Money
 import com.stayloop.domain.common.value.PageQuery
 import com.stayloop.domain.inventory.DailyRoomInventoryModel
@@ -18,6 +18,7 @@ import com.stayloop.domain.property.value.GuestCount
 import com.stayloop.domain.property.value.Name
 import com.stayloop.domain.property.value.PropertyCategory
 import com.stayloop.domain.property.value.PropertyPolicy
+import com.stayloop.domain.property.value.Rating
 import com.stayloop.domain.rate.DailyRoomRateModel
 import com.stayloop.domain.rate.ReservationPriceCalculator
 import com.stayloop.domain.reservation.value.StayPeriod
@@ -44,10 +45,10 @@ class PropertyFacadeTest {
 
     @BeforeEach
     fun setUp() {
-        properties = InMemoryPropertyRepository()
         roomTypes = InMemoryRoomTypeRepository()
         inventories = InMemoryDailyRoomInventoryRepository()
         rates = InMemoryDailyRoomRateRepository()
+        properties = InMemoryPropertyRepository(roomTypes, rates)
         sut = PropertyFacade(
             propertyRepository = properties,
             roomTypeRepository = roomTypes,
@@ -175,25 +176,36 @@ class PropertyFacadeTest {
             .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
     }
 
-    @DisplayName("search 는 RECOMMENDED 외 sort 키는 BAD_REQUEST 로 거절한다 (silent ignore 금지).")
+    @DisplayName("search 는 sort 4종 (RECOMMENDED / PRICE_ASC / RATING_DESC / WISHES_DESC) 모두 활성화된다 (week5 PR1 D-6).")
     @Test
-    fun shouldRejectUnsupportedSortKey() {
-        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+    fun shouldActivateAllFourSortKeys() {
+        // 같은 도시에 2 Property — wish_count / rating / 가격을 의도적으로 다르게.
+        val cheaper = saveProperty(name = "가성비호텔", city = "SEOUL", wishCount = 10, rating = 3.5)
+        val premium = saveProperty(name = "프리미엄호텔", city = "SEOUL", wishCount = 100, rating = 4.8)
         val period = StayPeriod(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 3))
-        saveRoomType(propertyId = property.id, name = "스탠다드", baseGuests = 2, maxGuests = 2)
+        val cheaperRoom = saveRoomType(propertyId = cheaper.id, name = "스탠다드", baseGuests = 2, maxGuests = 2)
+        val premiumRoom = saveRoomType(propertyId = premium.id, name = "디럭스", baseGuests = 2, maxGuests = 2)
+        seedAllDates(cheaperRoom.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 70_000)
+        seedAllDates(premiumRoom.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 200_000)
 
-        assertThatThrownBy {
-            sut.search(
-                PropertySearchCriteria(
-                    city = "SEOUL",
-                    period = period,
-                    guestCount = 2,
-                    page = PageQuery(page = 0, size = 20),
-                    sortKey = PropertySortKey.PRICE_ASC,
-                ),
-            )
-        }.isInstanceOf(CoreException::class.java)
-            .hasMessageContaining("RECOMMENDED")
+        fun searchWith(sortKey: PropertySortKey) = sut.search(
+            PropertySearchCriteria(
+                city = "SEOUL",
+                period = period,
+                guestCount = 2,
+                page = PageQuery(page = 0, size = 20),
+                sortKey = sortKey,
+            ),
+        ).content.map { it.propertyId }
+
+        // PRICE_ASC — 가성비 (70k) 가 프리미엄 (200k) 보다 먼저
+        assertThat(searchWith(PropertySortKey.PRICE_ASC)).containsExactly(cheaper.id, premium.id)
+        // WISHES_DESC — wish_count 100 > 10
+        assertThat(searchWith(PropertySortKey.WISHES_DESC)).containsExactly(premium.id, cheaper.id)
+        // RATING_DESC — rating 4.8 > 3.5
+        assertThat(searchWith(PropertySortKey.RATING_DESC)).containsExactly(premium.id, cheaper.id)
+        // RECOMMENDED — id ASC (저장 순서)
+        assertThat(searchWith(PropertySortKey.RECOMMENDED)).containsExactly(cheaper.id, premium.id)
     }
 
     @DisplayName("getDetail 은 존재하지 않는 propertyId 에 NOT_FOUND 를 던진다.")
@@ -246,8 +258,15 @@ class PropertyFacadeTest {
         assertThat(byName["FULL"]?.unavailableReason).contains("재고")
     }
 
-    private fun saveProperty(name: String, city: String): PropertyModel {
-        val property = PropertyModel.create(
+    private fun saveProperty(
+        name: String,
+        city: String,
+        wishCount: Int = 0,
+        rating: Double = 0.0,
+    ): PropertyModel {
+        // internal constructor 직접 사용 — wishCount / rating 은 운영에서 별도 흐름으로 갱신되는 *집계 상태* 라
+        // PropertyModel.create() 가 노출하지 않는다. 본 테스트는 정렬 의미론 검증이라 *시드 상태* 를 직접 주입.
+        val property = PropertyModel(
             name = Name(name),
             category = PropertyCategory.HOTEL,
             description = "테스트용 숙소",
@@ -258,6 +277,8 @@ class PropertyFacadeTest {
                 checkOutTime = LocalTime.of(11, 0),
                 cancellation = CancellationPolicy(type = CancellationType.FREE_UNTIL, freeUntilDaysBefore = 3),
             ),
+            rating = Rating(rating),
+            wishCount = wishCount,
         )
         return properties.save(property)
     }

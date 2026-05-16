@@ -10,6 +10,12 @@ spring:
         default_batch_fetch_size: 100
         timezone.default_storage: NORMALIZE_UTC
         jdbc.time_zone: UTC
+  flyway:
+    # baseline-on-migrate — Flyway 가 *비어있지 않은* DB 에 처음 붙을 때 V001 을 baseline 으로 마킹.
+    # week5 PR0 0-2 단계에서 docker exec 로 V001 을 *Flyway 우회* 적용해둔 상태라 본 옵션이 없으면
+    # `Found non-empty schema(s) but no schema history table` 으로 부트 거부 (week5-b.md L4 의 실제 부딪힘).
+    baseline-on-migrate: true
+    baseline-version: 1
 
 datasource:
   mysql-jpa:
@@ -37,7 +43,7 @@ spring:
   jpa:
     show-sql: true
     hibernate:
-      ddl-auto: create
+      ddl-auto: validate
 
 datasource:
   mysql-jpa:
@@ -53,7 +59,7 @@ spring:
   jpa:
     show-sql: true
     hibernate:
-      ddl-auto: create
+      ddl-auto: validate
 
 datasource:
   mysql-jpa:

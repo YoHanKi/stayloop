@@ -1,8 +1,8 @@
 package com.stayloop.application.property
 
 import com.stayloop.application.property.command.PropertySearchCriteria
-import com.stayloop.application.property.command.PropertySortKey
 import com.stayloop.application.property.command.RoomAvailabilityQuery
+import com.stayloop.domain.property.value.PropertySortKey
 import com.stayloop.domain.common.value.Money
 import com.stayloop.domain.common.value.PageResult
 import com.stayloop.domain.inventory.DailyRoomInventoryModel
@@ -39,19 +39,19 @@ class PropertyFacade(
     private val priceCalculator: ReservationPriceCalculator,
 ) {
     /**
-     * 도시 + 기간 + 인원 기준 Property 검색. (AC-1, AC-2)
+     * 도시 + 기간 + 인원 + 정렬 기준 Property 검색. (AC-1, AC-2 + week5 PR1 D-1 / D-6)
      *
      * 흐름:
-     * 1. `propertyRepository.findByCity(city, page)` — 도시 기준 Property 페이지 조회
-     * 2. **각 Property 마다** `roomTypeRepository.findByPropertyId(property.id)` 로 RoomType 목록 조회
-     *    — N+1 영역. 본 라운드는 의식적으로 단순화하고 4주차에 `findAllByPropertyIdIn` batch 로 전환
-     *    (verify-code §17 / `docs/plan/week2-3.md §⑧`)
-     * 3. **각 RoomType** 마다 기간 [checkIn, checkOut) 의 inventory / rate 조회 — 동일 N+1 영역
-     * 4. 가용성 판정 — 모든 일자에 inventory 존재 + `available > 0` + `maxGuests >= guestCount`
-     * 5. 가용 객실 중 *최저 합산가* 선택 — Property 단위 대표가로 사용 (AC-2 의 "최저가" 표현)
-     * 6. **가용 객실 0 인 Property 는 결과에서 제외** (AC-2)
-     * 7. **`page.total` 은 *전체* 매칭 행 수** — 가용 0 제외 후의 size 가 아니라 도시 매칭 size 로 기재. AC-1
-     *    의 페이지 의미를 도시 기준으로 유지 (가용성은 일시적 상태).
+     * 1. `propertyRepository.search(city, period, sortKey, page)` — 도시 기준 + sort 적용 Property 페이지.
+     *    - 비 PRICE_ASC: page.size 만큼 fetch.
+     *    - PRICE_ASC: K = page.size × 3 candidate overfetch (`PropertyRepositoryImpl` 박제).
+     * 2. 각 Property → N+1 으로 RoomType / Inventory / Rate (현 PR3 projection 합류 전).
+     * 3. 가용성 판정 — 모든 일자 inventory 존재 + `available > 0` + `maxGuests >= guestCount`.
+     * 4. 가용 객실 중 *최저 합산가* 선택 (AC-2 "최저가").
+     * 5. **가용 객실 0 Property 는 결과 제외** (AC-2). PRICE_ASC 는 K overfetch 후 *page.size 만큼 take* —
+     *    부족 시 그대로 반환 (week5-b.md decompose-decision Q4 δ 박제, imperfect pagination 한계 week6+ 인계).
+     * 6. **`page.total` = *도시 매칭 행 수*** (모든 sort 공통) — 가용 0 제외는 결과 content 에만 반영, total
+     *    의미는 도시 기준 유지 (AC-1 가용성은 일시적 상태).
      */
     @Transactional(readOnly = true)
     fun search(criteria: PropertySearchCriteria): PageResult<PropertySearchInfo> {
@@ -61,16 +61,22 @@ class PropertyFacade(
         if (criteria.guestCount <= 0) {
             throw CoreException(ErrorType.BAD_REQUEST, "투숙 인원은 1명 이상이어야 합니다.")
         }
-        if (criteria.sortKey != PropertySortKey.RECOMMENDED) {
-            throw CoreException(
-                ErrorType.BAD_REQUEST,
-                "현재는 RECOMMENDED 정렬만 지원합니다 (${criteria.sortKey} 는 P1 으로 미룸).",
-            )
-        }
 
-        val cityPage = propertyRepository.findByCity(criteria.city, criteria.page)
-        val infos = cityPage.content.mapNotNull { property ->
+        val cityPage = propertyRepository.search(
+            criteria.city,
+            criteria.period,
+            criteria.sortKey,
+            criteria.page,
+        )
+        val filtered = cityPage.content.mapNotNull { property ->
             buildSearchInfoOrNull(property, criteria.period, criteria.guestCount)
+        }
+        // PRICE_ASC 는 Repository 가 K = page.size × 3 candidates 를 반환하므로 가용성 필터 후 page.size 만큼 take.
+        // 다른 sort 는 Repository 가 이미 page.size 로 limit — take 가 no-op 이지만 일관성 위해 적용.
+        val infos = if (criteria.sortKey == PropertySortKey.PRICE_ASC) {
+            filtered.take(criteria.page.size)
+        } else {
+            filtered
         }
         return PageResult(content = infos, total = cityPage.total)
     }

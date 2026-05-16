@@ -6,8 +6,8 @@ import com.stayloop.application.property.PropertySearchInfo
 import com.stayloop.application.property.RoomTypeAvailabilityInfo
 import com.stayloop.application.property.RoomTypeInfo
 import com.stayloop.application.property.command.PropertySearchCriteria
-import com.stayloop.application.property.command.PropertySortKey
 import com.stayloop.application.property.command.RoomAvailabilityQuery
+import com.stayloop.domain.property.value.PropertySortKey
 import com.stayloop.domain.common.value.PageQuery
 import com.stayloop.domain.common.value.PageResult
 import com.stayloop.domain.property.value.BedType

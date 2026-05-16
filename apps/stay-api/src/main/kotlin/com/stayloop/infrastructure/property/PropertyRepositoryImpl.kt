@@ -1,17 +1,16 @@
 package com.stayloop.infrastructure.property
 
 import com.querydsl.core.types.OrderSpecifier
-import com.querydsl.core.types.dsl.ComparableExpressionBase
 import com.querydsl.jpa.impl.JPAQueryFactory
 import com.stayloop.domain.common.value.PageQuery
 import com.stayloop.domain.common.value.PageResult
-import com.stayloop.domain.common.value.SortDirection
-import com.stayloop.domain.common.value.SortKey
 import com.stayloop.domain.property.PropertyModel
 import com.stayloop.domain.property.PropertyRepository
 import com.stayloop.domain.property.QPropertyModel
-import com.stayloop.support.error.CoreException
-import com.stayloop.support.error.ErrorType
+import com.stayloop.domain.property.QRoomTypeModel
+import com.stayloop.domain.property.value.PropertySortKey
+import com.stayloop.domain.rate.QDailyRoomRateModel
+import com.stayloop.domain.reservation.value.StayPeriod
 import org.springframework.stereotype.Component
 
 @Component
@@ -24,37 +23,117 @@ class PropertyRepositoryImpl(
     override fun findById(id: Long): PropertyModel? = propertyJpaRepository.findById(id).orElse(null)
 
     /**
-     * 도시 기준 페이지 조회. **QueryDSL 직접 작성** — 문자열 JPQL `@Query` 가 아닌 type-safe 경로
-     * (`p.address.city`) 로 표현하여 컴파일 시점에 컬럼 오타 / 경로 변경 회귀를 차단한다 (verify-code §17 / §19-B).
+     * week5 PR1 D-6 — 4종 sort 모두 활성. 본 메서드의 SQL 분기는 V010 의 복합 인덱스 정합:
+     * - RECOMMENDED / WISHES_DESC / RATING_DESC — `properties` 단일 테이블 `ORDER BY` (각각 PK / (city, wish_count DESC) /
+     *   (city, rating DESC) prefix scan, filesort 없음).
+     * - PRICE_ASC — `properties JOIN room_types JOIN daily_room_rates` + GROUP BY p.id + ORDER BY MIN(price_per_night)
+     *   ASC. `daily_room_rates` 의 V010 `(room_type_id, date)` 인덱스 prefix scan 정합.
      *
-     * 정렬 화이트리스트: `wishCount` / `rating` / `name`. 미등록 키는 `BAD_REQUEST` 로 거절 — 외부 입력의 임의
-     * 키가 500 으로 터지는 것 방지 (Copilot #8).
+     * PRICE_ASC 만 K = `page.size * 3` candidate overfetch — Facade 가 후속 가용성 N+1 필터 후 page.size take.
+     * 본 PageResult.content.size 는 *최대 size×3* (다른 sort 는 정확히 page.size 또는 그 이하).
+     *
+     * `total` 은 모든 sort 에서 *city 매칭 row 수* — AC-1 정합 (가용성은 응답 시점 일시적 상태, total 의미 안 섞음).
      */
-    override fun findByCity(city: String, query: PageQuery): PageResult<PropertyModel> {
+    override fun search(
+        city: String,
+        period: StayPeriod,
+        sortKey: PropertySortKey,
+        page: PageQuery,
+    ): PageResult<PropertyModel> {
         val p = QPropertyModel.propertyModel
-        val condition = p.address.city.eq(city)
-
-        val content = queryFactory
-            .selectFrom(p)
-            .where(condition)
-            .orderBy(*toOrderSpecifiers(query.sort, p))
-            .offset((query.page.toLong()) * query.size.toLong())
-            .limit(query.size.toLong())
-            .fetch()
+        val cityCondition = p.address.city.eq(city)
 
         val total = queryFactory
             .select(p.count())
             .from(p)
-            .where(condition)
+            .where(cityCondition)
             .fetchOne() ?: 0L
 
+        val content = if (sortKey == PropertySortKey.PRICE_ASC) {
+            searchByPriceAsc(city, period, page)
+        } else {
+            queryFactory
+                .selectFrom(p)
+                .where(cityCondition)
+                .orderBy(*orderSpecifierForSimpleSort(sortKey, p))
+                .offset(page.offset.toLong())
+                .limit(page.size.toLong())
+                .fetch()
+        }
+
         return PageResult(content = content, total = total)
+    }
+
+    /**
+     * PRICE_ASC 의 hybrid 구현 — SQL JOIN GROUP BY MIN 으로 ID 정렬, 그 후 `findAllById` 로 hydrate.
+     *
+     * 2 round-trip 인 이유: `SELECT p.*, MIN(...) FROM ... GROUP BY p.id` 는 MySQL strict mode
+     * (ONLY_FULL_GROUP_BY) 에서 *p.id 외 모든 컬럼을 GROUP BY 에 추가* 해야 합법. 그러면 GROUP BY 비용 폭증.
+     * subquery → ID 만 정렬 → 별도 fetch 가 *index lookup* 으로 가벼움 (`idx_properties_city`).
+     *
+     * **K = page.size × 3 overfetch**: PR1 의 hybrid 결정 (week5-b.md L3 ↔ decompose-decision Q4 박제).
+     * Facade 가 후속 가용성 필터 후 page.size 만큼 take. 부족 시 그대로 반환 (δ — OFFSET 깊은 페이지 한계
+     * week6+ 인계 정합).
+     */
+    private fun searchByPriceAsc(
+        city: String,
+        period: StayPeriod,
+        page: PageQuery,
+    ): List<PropertyModel> {
+        val p = QPropertyModel.propertyModel
+        val rt = QRoomTypeModel.roomTypeModel
+        val rate = QDailyRoomRateModel.dailyRoomRateModel
+
+        val sortedIds = queryFactory
+            .select(p.id)
+            .from(p)
+            .innerJoin(rt).on(rt.propertyId.eq(p.id))
+            .innerJoin(rate).on(rate.roomTypeId.eq(rt.id))
+            .where(
+                p.address.city.eq(city),
+                rate.date.goe(period.checkIn),
+                rate.date.lt(period.checkOut),
+            )
+            .groupBy(p.id)
+            // pricePerNight 은 Money @Embedded VO 이고 컬럼은 amount (= price_per_night). QueryDSL path 는
+            // pricePerNight.amount 로 Long 컬럼 expression. min() → NumberExpression 의 asc() 발화.
+            .orderBy(rate.pricePerNight.amount.min().asc())
+            .offset(page.offset.toLong())
+            .limit((page.size * PRICE_ASC_CANDIDATE_MULTIPLIER).toLong())
+            .fetch()
+
+        if (sortedIds.isEmpty()) return emptyList()
+
+        val byId = propertyJpaRepository.findAllById(sortedIds).associateBy { it.id }
+        // SQL 의 정렬 순서를 보존 — findAllById 는 PK 순으로 반환할 수 있어 mapNotNull 로 ID 순서 강제.
+        return sortedIds.mapNotNull { byId[it] }
+    }
+
+    /**
+     * PRICE_ASC 외 sort 의 OrderSpecifier. V010 의 복합 인덱스와 1:1 정합.
+     */
+    private fun orderSpecifierForSimpleSort(
+        sortKey: PropertySortKey,
+        p: QPropertyModel,
+    ): Array<OrderSpecifier<*>> = when (sortKey) {
+        PropertySortKey.RECOMMENDED -> arrayOf(p.id.asc())
+        PropertySortKey.WISHES_DESC -> arrayOf(p.wishCount.desc())
+        PropertySortKey.RATING_DESC -> arrayOf(p.rating.value.desc())
+        PropertySortKey.PRICE_ASC -> error("PRICE_ASC 는 searchByPriceAsc 에서 처리해야 한다.")
     }
 
     override fun findAllByIds(ids: Collection<Long>): List<PropertyModel> =
         if (ids.isEmpty()) emptyList() else propertyJpaRepository.findAllById(ids).toList()
 
     override fun deleteById(id: Long) = propertyJpaRepository.deleteById(id)
+
+    companion object {
+        /**
+         * PRICE_ASC 의 candidate overfetch 배수. page.size × 본 상수 만큼 SQL 에서 정렬 후 가져옴 — Facade 가
+         * 후속 가용성 N+1 필터링 후 page.size 만큼 take. (week5-b.md decompose-decision Q4 박제)
+         */
+        private const val PRICE_ASC_CANDIDATE_MULTIPLIER: Int = 3
+    }
 
     /**
      * `wishCount` 1 증가 — QueryDSL `update().set(...).execute()`. (`docs/plan/week4/decision.md` D-6 정합)
@@ -92,30 +171,5 @@ class PropertyRepositoryImpl(
             .where(p.id.eq(propertyId).and(p.wishCount.gt(0)))
             .execute()
             .toInt()
-    }
-
-    /**
-     * 도메인 정렬 어휘 → QueryDSL `OrderSpecifier` 변환. 화이트리스트 미등록 키는 BAD_REQUEST.
-     * `@Embedded` VO 는 *내부 path* 로 명시 (Rating → `rating.value`, Name → `name.value`).
-     */
-    private fun toOrderSpecifiers(keys: List<SortKey>, p: QPropertyModel): Array<OrderSpecifier<*>> {
-        if (keys.isEmpty()) return emptyArray()
-        return keys
-            .map { key ->
-                val expr: ComparableExpressionBase<*> = when (key.property) {
-                    "wishCount" -> p.wishCount
-                    "rating" -> p.rating.value
-                    "name" -> p.name.value
-                    else -> throw CoreException(
-                        ErrorType.BAD_REQUEST,
-                        "지원하지 않는 정렬 키입니다: ${key.property}",
-                    )
-                }
-                when (key.direction) {
-                    SortDirection.ASC -> expr.asc()
-                    SortDirection.DESC -> expr.desc()
-                }
-            }
-            .toTypedArray()
     }
 }
