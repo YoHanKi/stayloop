@@ -44,7 +44,7 @@ import java.time.Duration
 class RedisCacheStore(
     @Qualifier(CacheRedisConfig.CACHE_REDIS_TEMPLATE)
     private val redisTemplate: RedisTemplate<String, Any>,
-) {
+) : CacheStore {
     private val log = LoggerFactory.getLogger(RedisCacheStore::class.java)
 
     /**
@@ -52,7 +52,7 @@ class RedisCacheStore(
      *
      * Redis 다운 시 `log.warn` 후 `null` — fallback 책임은 호출자 (보통 [getOrPut] 사용 권장).
      */
-    fun <T : Any> get(key: String, type: Class<T>): T? {
+    override fun <T : Any> get(key: String, type: Class<T>): T? {
         return try {
             val raw = redisTemplate.opsForValue().get(key) ?: return null
             type.cast(raw)
@@ -71,7 +71,7 @@ class RedisCacheStore(
      * Redis 다운 시: `log.warn` + `loader()` 결과 반환 (cache put 시도 X). 서비스가 죽지 않고 매 요청 DB
      * 로 빠지는 *graceful degradation* 박제.
      */
-    fun <T : Any> getOrPut(key: String, ttl: Duration, type: Class<T>, loader: () -> T): T {
+    override fun <T : Any> getOrPut(key: String, ttl: Duration, type: Class<T>, loader: () -> T): T {
         val cached = get(key, type)
         if (cached != null) return cached
 
@@ -88,7 +88,7 @@ class RedisCacheStore(
      * 외부 write 흐름의 *put-after-write* 갱신. *PR4 채택안 (I-1 evict-only) 은 사용 X* — Phase M 비교군
      * (I-2 put-after-write) 측정용으로만 노출. Redis 다운 시 silent fallback (`log.warn`).
      */
-    fun <T : Any> put(key: String, value: T, ttl: Duration) {
+    override fun <T : Any> put(key: String, value: T, ttl: Duration) {
         try {
             redisTemplate.opsForValue().set(key, value, ttl)
         } catch (e: DataAccessException) {
@@ -99,7 +99,7 @@ class RedisCacheStore(
     /**
      * 단일 key 무효화. Facade 의 `afterCommit` 흐름에서만 호출.
      */
-    fun evict(key: String) {
+    override fun evict(key: String) {
         try {
             redisTemplate.delete(key)
         } catch (e: DataAccessException) {
@@ -111,7 +111,7 @@ class RedisCacheStore(
      * Pattern 기반 무효화 (`KEYS` + `DEL`). **운영 latency 위험** — KDoc 의 *KEYS O(N) 한계* 박제.
      * Reservation commit 후 `availability:{rt}:*` 같은 *제한된 prefix* 만 호출.
      */
-    fun evictPattern(pattern: String) {
+    override fun evictPattern(pattern: String) {
         try {
             val keys = redisTemplate.keys(pattern)
             if (keys.isNotEmpty()) {

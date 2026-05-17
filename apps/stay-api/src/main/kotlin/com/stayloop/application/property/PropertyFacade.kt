@@ -12,10 +12,12 @@ import com.stayloop.domain.property.RoomTypeRepository
 import com.stayloop.domain.rate.DailyRoomRateRepository
 import com.stayloop.domain.rate.ReservationPriceCalculator
 import com.stayloop.domain.reservation.value.StayPeriod
+import com.stayloop.infrastructure.cache.CacheStore
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import java.time.Duration
 
 /**
  * Property 검색·상세 (시퀀스 1) Facade. (`docs/design/02-sequence-diagram.md §1`)
@@ -35,7 +37,13 @@ class PropertyFacade(
     private val inventoryRepository: DailyRoomInventoryRepository,
     private val rateRepository: DailyRoomRateRepository,
     private val priceCalculator: ReservationPriceCalculator,
+    private val cacheStore: CacheStore,
 ) {
+    companion object {
+        private const val DETAIL_KEY_PREFIX = "property:detail:"
+        private val DETAIL_TTL: Duration = Duration.ofMinutes(10)
+    }
+
     /**
      * 도시 + 기간 + 인원 + 정렬 기준 Property 검색. (AC-1, AC-2 + week5 PR1 D-1 / D-6 + PR3 D-3)
      *
@@ -88,14 +96,31 @@ class PropertyFacade(
      *
      * **이미지 조회 정책 (PR3, week5-b.md Loop 8'')**: PropertyImage 는 별도 AR — Facade 가 명시 호출. JPA
      * `@OneToMany` 의 *암시적 lazy loading* 보다 *명시적 Repository 호출* 의 추적 / 테스트 가능성 우위.
+     *
+     * **캐시 정책 (PR4 D-4, A-2)**: `property:detail:{id}` (TTL 10m) 를 통해 cache-aside 흐름. miss 시 loader
+     * 가 기존 3-쿼리 흐름 (findById + findByPropertyId × 2) 을 실행하고 결과를 cache 에 put. Redis 다운 시
+     * loader 결과 그대로 반환 (cache put 실패는 silent — `RedisCacheStore.getOrPut` KDoc 정합).
+     *
+     * **NOT_FOUND 처리**: loader 안에서 `findById` 가 `null` 이면 `CoreException(NOT_FOUND)` throw. cache 에
+     * *부정 응답* 은 저장하지 않는다 (`getOrPut` 이 throw 시 put 안 함). negative caching 은 본 라운드 외
+     * (week6+ 인계 — 부재 Property 에 대한 반복 호출 부하는 운영 합류 시 측정).
+     *
+     * **무효화 정책**: 본 라운드는 *Property 정적 정보 변경 흐름이 없음* — 어드민 수정 합류 시점 (week6+)
+     * 에 evict 호출 추가. TTL 10m 만료에 의존.
      */
     @Transactional(readOnly = true)
     fun getDetail(propertyId: Long): PropertyDetailInfo {
-        val property = propertyRepository.findById(propertyId)
-            ?: throw CoreException(ErrorType.NOT_FOUND, "존재하지 않는 숙소입니다.")
-        val roomTypes = roomTypeRepository.findByPropertyId(propertyId)
-        val images = propertyImageRepository.findByPropertyId(propertyId)
-        return PropertyDetailInfo.of(property, roomTypes, images)
+        return cacheStore.getOrPut(
+            key = DETAIL_KEY_PREFIX + propertyId,
+            ttl = DETAIL_TTL,
+            type = PropertyDetailInfo::class.java,
+        ) {
+            val property = propertyRepository.findById(propertyId)
+                ?: throw CoreException(ErrorType.NOT_FOUND, "존재하지 않는 숙소입니다.")
+            val roomTypes = roomTypeRepository.findByPropertyId(propertyId)
+            val images = propertyImageRepository.findByPropertyId(propertyId)
+            PropertyDetailInfo.of(property, roomTypes, images)
+        }
     }
 
     /**

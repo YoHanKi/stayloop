@@ -24,6 +24,7 @@ import com.stayloop.domain.rate.ReservationPriceCalculator
 import com.stayloop.domain.reservation.value.StayPeriod
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
+import com.stayloop.support.test.InMemoryCacheStore
 import com.stayloop.support.test.InMemoryDailyRoomInventoryRepository
 import com.stayloop.support.test.InMemoryDailyRoomRateRepository
 import com.stayloop.support.test.InMemoryPropertyImageRepository
@@ -43,6 +44,7 @@ class PropertyFacadeTest {
     private lateinit var propertyImages: InMemoryPropertyImageRepository
     private lateinit var inventories: InMemoryDailyRoomInventoryRepository
     private lateinit var rates: InMemoryDailyRoomRateRepository
+    private lateinit var cacheStore: InMemoryCacheStore
     private lateinit var sut: PropertyFacade
 
     @BeforeEach
@@ -52,6 +54,7 @@ class PropertyFacadeTest {
         inventories = InMemoryDailyRoomInventoryRepository()
         rates = InMemoryDailyRoomRateRepository()
         properties = InMemoryPropertyRepository(roomTypes, rates, inventories)
+        cacheStore = InMemoryCacheStore()
         sut = PropertyFacade(
             propertyRepository = properties,
             roomTypeRepository = roomTypes,
@@ -59,6 +62,7 @@ class PropertyFacadeTest {
             inventoryRepository = inventories,
             rateRepository = rates,
             priceCalculator = ReservationPriceCalculator(),
+            cacheStore = cacheStore,
         )
     }
 
@@ -234,6 +238,33 @@ class PropertyFacadeTest {
         assertThat(info.city).isEqualTo("SEOUL")
         assertThat(info.roomTypes).hasSize(2)
         assertThat(info.roomTypes.map { it.name }).containsExactlyInAnyOrder("스탠다드", "디럭스")
+    }
+
+    @DisplayName("getDetail 은 두 번째 호출에서 cache hit 으로 응답하고 Repository 를 다시 조회하지 않는다 (PR4 A-2).")
+    @Test
+    fun shouldServeDetailFromCacheOnSecondCall() {
+        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+        saveRoomType(propertyId = property.id, name = "스탠다드", baseGuests = 2, maxGuests = 2)
+
+        val first = sut.getDetail(property.id)
+        // cache hit 검증 — 두 번째 호출이 첫 번째와 *완전히 동일한 인스턴스* (Info data class equality)
+        val second = sut.getDetail(property.id)
+        assertThat(second).isEqualTo(first)
+
+        // Repository 의 *실제 데이터 상태* 가 바뀌어도 cache 가 유지하는 옛 응답이 그대로 — cache hit 의 직접 증거.
+        // 본 Property 를 mutate (rating 갱신) 한 뒤 다시 getDetail 호출 — 여전히 *첫 호출* 의 응답이 와야 함.
+        val mutated = properties.findById(property.id)!!.also {
+            // Rating 은 protected set 라 직접 변경 X — 대신 새 객실 추가로 *Repository 상태* 만 변경
+            saveRoomType(propertyId = property.id, name = "스위트", baseGuests = 2, maxGuests = 6)
+        }
+        val third = sut.getDetail(property.id)
+        // 새 객실이 cache 응답에는 *없음* — cache hit 의 증거
+        assertThat(third.roomTypes.map { it.name }).containsExactly("스탠다드")
+
+        // 캐시 무효화 후 재호출은 새 상태 반영
+        cacheStore.evict("property:detail:${property.id}")
+        val refreshed = sut.getDetail(property.id)
+        assertThat(refreshed.roomTypes.map { it.name }).containsExactlyInAnyOrder("스탠다드", "스위트")
     }
 
     @DisplayName("getAvailableRooms 는 가용 / 인원 초과 / 재고 부족 / 일자 누락을 사유와 함께 노출한다.")
