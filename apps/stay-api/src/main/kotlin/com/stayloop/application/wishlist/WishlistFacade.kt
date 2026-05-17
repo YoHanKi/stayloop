@@ -4,11 +4,14 @@ import com.stayloop.domain.common.value.PageQuery
 import com.stayloop.domain.property.PropertyRepository
 import com.stayloop.domain.user.value.LoginId
 import com.stayloop.domain.wishlist.WishlistRepository
+import com.stayloop.infrastructure.cache.CacheStore
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import org.springframework.transaction.support.TransactionSynchronization
+import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.time.Clock
 import java.time.LocalDateTime
 
@@ -63,9 +66,39 @@ import java.time.LocalDateTime
 class WishlistFacade(
     private val wishlistRepository: WishlistRepository,
     private val propertyRepository: PropertyRepository,
+    private val cacheStore: CacheStore,
     private val clock: Clock,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
+
+    companion object {
+        private const val DETAIL_KEY_PREFIX = "property:detail:"
+    }
+
+    /**
+     * `property:detail:{id}` cache 를 *TX commit 후* evict.
+     *
+     * **TX 안 evict = race window (Loop 7 §고민 5)**: evict 후 DB rollback 시 cache 가 *없는 상태*, DB 는
+     * *옛 상태* → 다음 read 가 옛 상태로 cache 재진입 → 옛 wishCount 박제. **반드시 afterCommit** 에서만
+     * 호출.
+     *
+     * **TX 가 없으면 즉시 evict** — 단위 테스트 / 비TX 호출 호환. 약속 자체는 "eventually evict" 라
+     * TX 가 없는 경로에서는 즉시가 *그 약속의 단순 경로*.
+     */
+    private fun evictDetailCacheAfterCommit(propertyId: Long) {
+        val key = DETAIL_KEY_PREFIX + propertyId
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(
+                object : TransactionSynchronization {
+                    override fun afterCommit() {
+                        cacheStore.evict(key)
+                    }
+                },
+            )
+        } else {
+            cacheStore.evict(key)
+        }
+    }
 
     /**
      * 숙소 찜 등록. 이미 찜된 경우 noop (멱등, AC-6). wishCount 갱신은 *atomic UPDATE* (Phase C-2).
@@ -83,6 +116,8 @@ class WishlistFacade(
         val countBefore = property.wishCount
         wishlistRepository.save(loginId, propertyId, LocalDateTime.now(clock))
         propertyRepository.atomicIncrementWishCount(propertyId)
+        // detail cache 의 wishCount 가 stale 이 되었으므로 TX commit 후 evict (PR4 A-3).
+        evictDetailCacheAfterCommit(propertyId)
         return WishlistToggleInfo(propertyId = propertyId, wished = true, wishCount = countBefore + 1)
     }
 
@@ -107,6 +142,10 @@ class WishlistFacade(
         //     아님 — 사용자 UX 측면에서는 "내 unwish 가 적용됐다 + 카운트가 -1 됐다" 만 알면 충분.
         val affected = propertyRepository.atomicDecrementWishCount(propertyId)
         val responseCount = if (affected == 1) (countBefore - 1).coerceAtLeast(0) else countBefore
+        // 실제 감소 발생 시에만 evict — affected = 0 (이미 0) 면 detail cache 의 wishCount 도 0 이라 stale 아님.
+        if (affected == 1) {
+            evictDetailCacheAfterCommit(propertyId)
+        }
         return WishlistToggleInfo(propertyId = propertyId, wished = false, wishCount = responseCount)
     }
 
