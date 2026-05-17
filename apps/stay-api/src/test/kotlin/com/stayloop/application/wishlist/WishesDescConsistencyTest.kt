@@ -32,7 +32,9 @@ import com.stayloop.domain.user.value.Email
 import com.stayloop.domain.user.value.LoginId
 import com.stayloop.domain.user.value.PhoneNumber
 import com.stayloop.testcontainers.MySqlTestContainersConfig
+import com.stayloop.testcontainers.RedisTestContainersConfig
 import com.stayloop.utils.DatabaseCleanUp
+import com.stayloop.utils.RedisCleanUp
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -73,7 +75,7 @@ import com.stayloop.domain.user.value.Name as UserName
  */
 @SpringBootTest
 @ActiveProfiles("test")
-@Import(MySqlTestContainersConfig::class)
+@Import(MySqlTestContainersConfig::class, RedisTestContainersConfig::class)
 class WishesDescConsistencyTest {
     @Autowired
     private lateinit var sut: PropertyFacade
@@ -102,17 +104,24 @@ class WishesDescConsistencyTest {
     @Autowired
     private lateinit var databaseCleanUp: DatabaseCleanUp
 
+    @Autowired
+    private lateinit var redisCleanUp: RedisCleanUp
+
     private val city = "seoul"
     private val period = StayPeriod(LocalDate.of(2026, 7, 30), LocalDate.of(2026, 8, 4))
 
     @BeforeEach
     fun cleanUp() {
         databaseCleanUp.truncateAllTables()
+        // PR4 search cache (TTL 5m) 가 wish/unwish 의 WISHES_DESC 회귀 검증을 가리지 않게 매 테스트 cache 비움.
+        // 운영의 *cache stale 5m 수용* trade-off 와 분리 — 본 테스트는 DB→search 노출 정합만 검증.
+        redisCleanUp.truncateAll()
     }
 
     @AfterEach
     fun tearDown() {
         databaseCleanUp.truncateAllTables()
+        redisCleanUp.truncateAll()
     }
 
     @DisplayName(
@@ -128,8 +137,12 @@ class WishesDescConsistencyTest {
         val user1 = seedUser(loginId = "userone")
         val user2 = seedUser(loginId = "usertwo")
 
+        // **search cache 우회 정책 (본 테스트 의도)**: 매 검색 직전 redis 비움 — *DB→search 노출 정합* 만
+        // 검증. PR4 search cache (TTL 5m) 의 stale 수용은 별도 trade-off 박제 (KDoc 정합).
+
         // when (1) — user1 이 P2 에 wish → P2.wish_count = 1
         wishlist.wish(user1.loginId, p2.id)
+        redisCleanUp.truncateAll()
 
         // then (1) — 별도 TX 의 WISHES_DESC 검색에 즉시 visible. P2 가 1등.
         val afterFirstWish = sut.search(searchCriteria(PropertySortKey.WISHES_DESC)).content
@@ -139,6 +152,7 @@ class WishesDescConsistencyTest {
 
         // when (2) — user2 도 P2 에 wish → P2.wish_count = 2 (서로 다른 사용자, wishlist UNIQUE 통과)
         wishlist.wish(user2.loginId, p2.id)
+        redisCleanUp.truncateAll()
 
         // then (2) — P2 여전히 1등 (2 > 0)
         val afterSecondWish = sut.search(searchCriteria(PropertySortKey.WISHES_DESC)).content
@@ -148,6 +162,7 @@ class WishesDescConsistencyTest {
 
         // when (3) — user1 이 P3 에 wish → P3.wish_count = 1. P2 = 2 > P3 = 1 > P1 = 0 으로 *명백 비동률*.
         wishlist.wish(user1.loginId, p3.id)
+        redisCleanUp.truncateAll()
 
         // then (3) — 검색 결과 순서가 정확히 P2 → P3 → P1 (명백 비동률, 결정적)
         val afterThirdWish = sut.search(searchCriteria(PropertySortKey.WISHES_DESC)).content
@@ -156,6 +171,7 @@ class WishesDescConsistencyTest {
 
         // when (4) — user1 이 P2 에 unwish → P2.wish_count = 1. atomic decrement `WHERE wish_count > 0` 정합.
         wishlist.unwish(user1.loginId, p2.id)
+        redisCleanUp.truncateAll()
 
         // then (4) — P2 = 1 = P3, P1 = 0. P2 vs P3 의 tie-break 는 비결정 (KDoc 정책) — 두 properties 가
         // *상위 2등 안에* 있으면 OK, 마지막이 P1 인 것만 검증.
@@ -181,6 +197,8 @@ class WishesDescConsistencyTest {
 
         // when — user2 (찜한 적 없음) 가 P1 에 unwish 호출 (멱등 noop, AC-6)
         wishlist.unwish(user2.loginId, p1.id)
+        // 본 테스트 의도 (DB→search 노출 정합) 보존 위해 search cache 우회
+        redisCleanUp.truncateAll()
 
         // then — wish_count 불변, 검색 순서 그대로 P1 → P2.
         val result = sut.search(searchCriteria(PropertySortKey.WISHES_DESC)).content

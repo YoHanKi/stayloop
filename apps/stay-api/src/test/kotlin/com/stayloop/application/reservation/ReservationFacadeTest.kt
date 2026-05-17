@@ -100,6 +100,9 @@ class ReservationFacadeTest {
             couponTemplateRepository = couponTemplates,
             couponIssueService = CouponIssueService(),
             userRepository = users,
+            availabilityCacheStore = com.stayloop.infrastructure.cache.AvailabilityCacheStore(
+                com.stayloop.support.test.InMemoryCacheStore(),
+            ),
             clock = fixedClock,
         )
     }
