@@ -35,6 +35,35 @@ interface PropertyRepository {
         page: PageQuery,
     ): PageResult<PropertyModel>
 
+    /**
+     * Property 검색 *projection* — N+1 제거 + 가용성 / 최저가 / 가용 RoomType 수 집계 (week5 PR3 D-3).
+     *
+     * **반환**: city 매칭 + *가용 RoomType ≥ 1* Property 만 — 가용 0 Property 는 결과 제외 (AC-2).
+     * `PageResult.total` 은 *city 매칭 전체 row 수* 유지 (`search` 의 total 의미와 정합 — 가용성 제외 X).
+     *
+     * **가용 조건**:
+     * - `room_types.max_guests >= guestCount`
+     * - 기간 내 *모든 일자* `daily_room_rates` 행 존재
+     * - 기간 내 *모든 일자* `daily_room_inventories.total_rooms > reserved_rooms` (available > 0)
+     *
+     * **`sortKey` 별 ORDER BY** (V010 인덱스 + JOIN 정합):
+     * - RECOMMENDED — `p.id ASC`
+     * - WISHES_DESC — `p.wish_count DESC, p.id ASC`
+     * - RATING_DESC — `p.rating DESC, p.id ASC`
+     * - PRICE_ASC — `lowest_total ASC, p.id ASC` (Step 2 의 *실제 최저 합산가* 기준)
+     *
+     * **N+1 제거 효과**: 기존 `search + Facade.buildSearchInfoOrNull` 의 1 + N + N×M SQL 흐름 →
+     * 본 메서드 4 SQL (total + candidates + rt aggregation + property fetch). PR1 의 *N+1 잔량 부담*
+     * (k6 시나리오 A RPS 100 미달 / PR2 sort=WISHES_DESC SLA 미달 333ms) 의 직접 해소.
+     */
+    fun searchInfos(
+        city: String,
+        period: StayPeriod,
+        sortKey: PropertySortKey,
+        guestCount: Int,
+        page: PageQuery,
+    ): PageResult<PropertySearchRow>
+
     fun findAllByIds(ids: Collection<Long>): List<PropertyModel>
 
     fun deleteById(id: Long)

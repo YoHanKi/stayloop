@@ -5,6 +5,7 @@ import com.stayloop.domain.common.value.PageQuery
 import com.stayloop.domain.common.value.PageResult
 import com.stayloop.domain.property.PropertyModel
 import com.stayloop.domain.property.PropertyRepository
+import com.stayloop.domain.property.PropertySearchRow
 import com.stayloop.domain.property.value.PropertySortKey
 import com.stayloop.domain.reservation.value.StayPeriod
 import com.stayloop.support.error.CoreException
@@ -27,6 +28,7 @@ import com.stayloop.support.error.ErrorType
 class InMemoryPropertyRepository(
     private val roomTypeStore: InMemoryRoomTypeRepository? = null,
     private val rateStore: InMemoryDailyRoomRateRepository? = null,
+    private val inventoryStore: InMemoryDailyRoomInventoryRepository? = null,
 ) : PropertyRepository {
     private val store = mutableMapOf<Long, PropertyModel>()
     private var sequence = 0L
@@ -107,6 +109,81 @@ class InMemoryPropertyRepository(
         PropertySortKey.RATING_DESC -> compareByDescending { it.rating.value }
         PropertySortKey.PRICE_ASC ->
             throw CoreException(ErrorType.INTERNAL_ERROR, "PRICE_ASC 는 searchByPriceAsc 에서 처리해야 한다.")
+    }
+
+    /**
+     * 운영 RepositoryImpl 의 `searchInfos` (PR3 D-3) 와 *의미론 동치* (verify-code §19-A).
+     *
+     * **재현 흐름**: 운영의 2-step batch IN 을 InMemory 로 재현:
+     * 1. city 매칭 + total = city row 수.
+     * 2. 각 Property 의 RoomType × 기간 → *모든 일자 inventory.available > 0* + *모든 일자 rate 존재* +
+     *    `max_guests >= guestCount` 통과 RoomType 만 후보.
+     * 3. 각 RoomType 의 합산가 SUM(rate.pricePerNight) → 가장 낮은 값이 `lowestTotalPrice`.
+     * 4. 통과 RoomType 수 = `availableRoomTypeCount`. 0 이면 결과 제외.
+     * 5. sortKey 별 정렬 + 동률 tie-break id ASC + LIMIT/OFFSET.
+     *
+     * **roomTypeStore / rateStore / inventoryStore 미주입 시 명시적 예외** — 운영 JOIN 재현 불가.
+     */
+    override fun searchInfos(
+        city: String,
+        period: StayPeriod,
+        sortKey: PropertySortKey,
+        guestCount: Int,
+        page: PageQuery,
+    ): PageResult<PropertySearchRow> {
+        val roomTypes = requireNotNull(roomTypeStore) {
+            "searchInfos 는 InMemoryRoomTypeRepository 주입이 필요하다 (운영 SQL 의 JOIN room_types 재현)."
+        }
+        val rates = requireNotNull(rateStore) {
+            "searchInfos 는 InMemoryDailyRoomRateRepository 주입이 필요하다 (운영 SQL 의 JOIN daily_room_rates 재현)."
+        }
+        val inventories = requireNotNull(inventoryStore) {
+            "searchInfos 는 InMemoryDailyRoomInventoryRepository 주입이 필요하다 (운영 SQL 의 JOIN daily_room_inventories 재현)."
+        }
+
+        val matched = store.values.filter { it.address.city == city }
+        val total = matched.size.toLong()
+        val expectedDates = period.datesToReserve().toSet()
+
+        val rows = matched.mapNotNull { property ->
+            val propertyRoomTypes = roomTypes.findByPropertyId(property.id)
+                .filter { it.guestCount.max >= guestCount }
+            val availableTotals = propertyRoomTypes.mapNotNull { rt ->
+                val invs = inventories.findAllInRange(rt.id, period.checkIn, period.checkOut)
+                if (invs.size != expectedDates.size) return@mapNotNull null
+                if (invs.map { it.date }.toSet() != expectedDates) return@mapNotNull null
+                if (invs.any { it.available() <= 0 }) return@mapNotNull null
+                val rs = rates.findAllInRange(rt.id, period.checkIn, period.checkOut)
+                if (rs.size != expectedDates.size) return@mapNotNull null
+                if (rs.map { it.date }.toSet() != expectedDates) return@mapNotNull null
+                rs.sumOf { it.pricePerNight.amount }
+            }
+            if (availableTotals.isEmpty()) return@mapNotNull null
+            PropertySearchRow(
+                propertyId = property.id,
+                name = property.name.value,
+                city = property.address.city,
+                fullAddress = property.address.fullAddress,
+                mainImageUrl = property.mainImageUrl,
+                starRating = property.starRating?.value,
+                rating = property.rating.value,
+                wishCount = property.wishCount,
+                lowestTotalPrice = availableTotals.min(),
+                availableRoomTypeCount = availableTotals.size,
+            )
+        }
+
+        val sorted = rows.sortedWith(searchRowComparator(sortKey))
+        val from = page.offset.coerceAtMost(sorted.size)
+        val to = (from + page.limit).coerceAtMost(sorted.size)
+        return PageResult(content = sorted.subList(from, to), total = total)
+    }
+
+    private fun searchRowComparator(sortKey: PropertySortKey): Comparator<PropertySearchRow> = when (sortKey) {
+        PropertySortKey.RECOMMENDED -> compareBy({ it.propertyId })
+        PropertySortKey.WISHES_DESC -> compareByDescending<PropertySearchRow> { it.wishCount }.thenBy { it.propertyId }
+        PropertySortKey.RATING_DESC -> compareByDescending<PropertySearchRow> { it.rating }.thenBy { it.propertyId }
+        PropertySortKey.PRICE_ASC -> compareBy<PropertySearchRow> { it.lowestTotalPrice }.thenBy { it.propertyId }
     }
 
     override fun findAllByIds(ids: Collection<Long>): List<PropertyModel> = ids.mapNotNull { store[it] }

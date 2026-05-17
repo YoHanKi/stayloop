@@ -58,6 +58,13 @@ documents/blog
 !documents/feature/user-architecture/pr.md
 !documents/feature/user/pr.md
 
+### feature 박제 md (사용자 로컬 검토용, commit 금지 — CLAUDE.md "Md 박제 파일은 commit 금지" 정책) ###
+# Claude 가 자동 commit 하지 않는다 (`-f` 강제 추가는 사용자 명시 요청 시만).
+# 이미 history 에 있는 기존 박제 (perf-experiment-infra 등) 는 git 추적 유지 — 새 박제만 ignore.
+documents/feature/*/comparison.md
+documents/feature/*/k6-results.md
+documents/feature/*/experiments-results.md
+
 ### technical observation tests ###
 **/src/test/java/**/technical/
 **/src/test/java/**/benchmark
