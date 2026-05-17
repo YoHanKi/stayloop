@@ -67,6 +67,30 @@ Stayloop — Spring Boot 3 + Kotlin 멀티모듈 숙박 예약 백엔드.
 - 변경 리스크가 *시각적으로 명백* 한 typo 수정.
 - *비즈니스 결정* 이 본질인 항목 (쿠폰 복원 / 다국적 통화 등 — 측정 항목 X).
 
+### k6 부하 실행 정책 (사용자 모니터링 확인 대기 의무)
+
+k6 부하 테스트를 실행할 때는 *반드시* 사용자가 *실시간 모니터링* 할 수 있는 환경을 먼저 구축하고, 사용자의 *명시 신호* 를 받은 후에 부하를 발사한다. Claude 가 *임의로* k6 를 실행하지 않는다.
+
+**필수 절차** (모든 k6 부하 실행 시):
+1. **Grafana / Prometheus 부팅** — `docker-compose -f ./docker/monitoring-compose.yml up -d`. Prometheus 가 stay-api 의 `/actuator/prometheus` 를 5초마다 스크랩하는지 확인 (`docker/grafana/prometheus.yml` 의 target `host.docker.internal:8082` — 로컬 wslrelay 가 8081 을 점유하는 경우 `MANAGEMENT_SERVER_PORT=8082` env 로 override 정합).
+2. **대시보드 접속 안내** — Grafana `http://localhost:3000` (admin/admin), `Stayloop / k6 Load Test (stay-api)` 대시보드 (`docker/grafana/provisioning/dashboards/stayloop-k6-load.json` provisioning 자동 등록).
+3. **stay-api 부팅** — `SPRING_PROFILES_ACTIVE=local MANAGEMENT_SERVER_PORT=8082 ./gradlew :apps:stay-api:bootRun`. 부팅 완료 ("Started StayApiApplication") 확인.
+4. **사용자 확인 대기** — *"Grafana 에서 시계열이 흐르는 게 확인되면 알려달라"* 의 명시 요청을 보내고 *응답 대기*. Claude 가 자체 판단으로 k6 발사 금지.
+5. **k6 발사** — 사용자가 *"준비됐다" / "시작해" / "쏴줘"* 등으로 명시 신호를 보낸 후에만 `k6 run k6/local/<scenario>.js` 실행.
+
+**예외 없음** — *모든 k6 부하 실행* (시나리오 A/B/C/D/E/F/G 포함) 에 적용. CI 자동 부하는 본 정책 외 (week6+ 인계 영역).
+
+**모니터링 대시보드 패널** (`docker/grafana/provisioning/dashboards/stayloop-k6-load.json`):
+- HTTP Request Rate (RPS by URI / status) — k6 시나리오 부하 도달 확인
+- HTTP Duration p50 / p95 / p99 (by URI) — SLA 임계 시각화
+- 5xx Rate — 백프레셔 / pool exhaustion 시그널
+- JVM Memory Used (heap / non-heap) — 메모리 압박
+- HikariCP Connections (active / idle / pending) — DB 풀 상태
+- CPU Usage (process / system)
+- Tomcat Threads (busy / current) — accept queue 포화 시그널
+
+**왜 사용자 확인이 의무인가**: k6 부하는 *수십 초 ~ 분 단위* 의 *실시간 거동* 을 사용자가 직접 봐야 *어디서 무엇이 꺾이는가* 를 학습 자산으로 박는다. 결과 박제 (`k6-results.md`) 는 *사후 숫자*, 실시간 그래프는 *원인 추적의 SSOT*. Claude 가 임의 실행 시 사용자는 *결과만* 보고 *과정* 을 잃는다.
+
 ## 도메인 / 아키텍처
 
 세부 규칙은 본 파일에 중복 기재하지 않는다. 새 Aggregate 를 만들거나 기존 구조를 검수할 때 다음을 참조한다.

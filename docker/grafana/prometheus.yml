@@ -1,8 +1,15 @@
 global:
   scrape_interval: 5s
 
+# stay-api 의 actuator prometheus 엔드포인트.
+# `supports/monitoring/monitoring.yml` 의 `management.server.port` 가 8081 이지만, 본 로컬에서는 wslrelay.exe
+# 가 8081 을 점유하고 있어 `MANAGEMENT_SERVER_PORT=8082` env 로 override 함. prometheus 의 scrape target 도
+# 동일하게 8082 로 맞춤.
 scrape_configs:
-  - job_name: 'spring-boot-app'
+  - job_name: 'stayloop-stay-api'
     metrics_path: '/actuator/prometheus'
     static_configs:
-      - targets: ['host.docker.internal:8081']
+      - targets: ['host.docker.internal:8082']
+        labels:
+          app: 'stay-api'
+          env: 'local'
