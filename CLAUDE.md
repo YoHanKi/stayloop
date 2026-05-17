@@ -80,3 +80,23 @@ Stayloop — Spring Boot 3 + Kotlin 멀티모듈 숙박 예약 백엔드.
 - 메시지 형식: `<prefix> : <한 줄 요약 (한국어, 마침표).>` (`feat`/`fix`/`refactor`/`migration`/`docs`/`chore`/`skills`)
 - **`Co-Authored-By: Claude ...` 트레일러는 기본적으로 추가하지 않는다.** 일반 기능·버그·리팩토링·마이그레이션 커밋의 작성자는 사람이며, Claude 가 공동 작성자로 표기되면 git blame / 기여도 추적이 혼동된다.
 - 예외: 변경이 **CLAUDE.md** 또는 `.claude/skills/**` 에 한정된 경우(= Claude 와의 협업 자체가 변경의 본질) 에 한해 `Co-Authored-By` 트레일러를 허용한다.
+
+### Md 박제 파일은 commit 금지 (사용자 로컬 검토용)
+
+Claude 는 *코드 / 테스트 / 마이그레이션 SQL* 만 자동으로 stage / commit 한다. 아래 *박제용 md 파일* 들은 **사용자가 직접 검토 후 본인 시점에 commit 할 로컬 산출물** 이라 Claude 가 `git add` / `git commit` 대상으로 삼지 않는다 (`-f` 강제 추가도 금지 — 사용자 명시 요청 시만).
+
+**대상**:
+- `docs/plan/week{n}-b.md` (Loop walkthrough)
+- `docs/plan/week{n}/decision.md` (decision log, `record-decision` 산출물)
+- `documents/feature/{topic}/comparison.md` (실험 비교 매트릭스)
+- `documents/feature/{topic}/k6-results.md` (k6 측정 박제)
+- `documents/feature/{topic}/seed-load.md` / `experiments-results.md` 등 기타 박제용 md
+
+**예외**: 사용자가 *명시적으로* "decision.md 커밋해줘" / "comparison.md 도 같이 stage" 등으로 요청한 경우만 stage / commit.
+
+**왜**: 박제 md 는 사용자의 *검토 사이클* 산물 — Claude 가 미리 commit 하면 (a) 검토 전 history 에 들어가고 (b) 사용자가 본인 흐름에 맞게 묶어 push / PR 하는 결정권을 침해. PR1 (`feature/property-search-perf-index`) 까지는 commit 했으나 PR2 부터 정책 변경.
+
+**Stage 흐름**:
+- ✅ 코드 / 테스트 변경 → `git add <code>` → commit
+- ✅ 마이그레이션 SQL (`db/migration/V*.sql`) → `git add` → commit
+- ❌ 박제 md → 디스크에 남기되 stage X. commit message 에서 *박제 위치* path 만 참조 OK.
