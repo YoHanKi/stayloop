@@ -42,6 +42,8 @@ class PropertyFacade(
     companion object {
         private const val DETAIL_KEY_PREFIX = "property:detail:"
         private val DETAIL_TTL: Duration = Duration.ofMinutes(10)
+        private const val SEARCH_KEY_PREFIX = "search:result:"
+        private val SEARCH_TTL: Duration = Duration.ofMinutes(5)
     }
 
     /**
@@ -53,6 +55,20 @@ class PropertyFacade(
      *
      * **`page.total`** — Repository 가 *city 매칭 전체 row 수* 로 박제. 가용 0 Property 는 *content 에서만* 제외,
      * total 은 도시 기준 유지 (AC-1 가용성은 일시적 상태).
+     *
+     * **캐시 정책 (PR4 D-4, A-4)**: `search:result:{city}:{sort}:{checkIn}:{checkOut}:{guests}:{page}:{size}`
+     * (TTL 5m) 로 cache-aside. 응답 `PageResult<PropertySearchInfo>` 전체를 직렬화.
+     *
+     * **본 라운드의 trade-off — plan 의 *정적/동적 분리* 와 부분 어긋남**:
+     * - plan A-4 명세: *키에 일자/게스트수 미포함* — 정적/동적 분리의 본질 (Loop 7 §고민 2 카디널리티 폭발 회피).
+     * - 본 라운드 구현: *키에 일자/게스트수 포함* — 응답 구조 (`PropertySearchInfo` 가 `lowestTotalPrice` /
+     *   `availableRoomTypeCount` 같은 동적 필드 포함) 와 강결합. 응답 분리 (정적 부분만 cache + 동적은 매
+     *   요청) 는 복잡도 큼 — Phase M (비교군 측정) 에서 hit rate 측정 후 GR-3 진화 여부 결정.
+     * - 본 trade-off 의 *학습 자산* — *Loop 7 §고민 2 의 카디널리티 위험을 측정으로 입증* 하는 것.
+     *
+     * **무효화 정책**: 본 라운드는 evict 호출 없음 — TTL 5m 만료에 의존. wish/unwish 의 wishCount 변경은
+     * WISHES_DESC 정렬에 영향을 주지만 5분 stale 은 *정적 분리의 정의* (Loop 7 §고민 2 와 정합). 결제 흐름은
+     * 본 cache 를 *결정 근거로 사용 금지* — PR5 D-5 의 *결제 직전 DB 재확인* contract.
      */
     @Transactional(readOnly = true)
     fun search(criteria: PropertySearchCriteria): PageResult<PropertySearchInfo> {
@@ -63,6 +79,29 @@ class PropertyFacade(
             throw CoreException(ErrorType.BAD_REQUEST, "투숙 인원은 1명 이상이어야 합니다.")
         }
 
+        val cacheKey = buildSearchCacheKey(criteria)
+
+        @Suppress("UNCHECKED_CAST")
+        return cacheStore.getOrPut(
+            key = cacheKey,
+            ttl = SEARCH_TTL,
+            type = PageResult::class.java,
+        ) {
+            loadSearchPage(criteria)
+        } as PageResult<PropertySearchInfo>
+    }
+
+    private fun buildSearchCacheKey(criteria: PropertySearchCriteria): String =
+        SEARCH_KEY_PREFIX +
+            "${criteria.city}:" +
+            "${criteria.sortKey}:" +
+            "${criteria.period.checkIn}:" +
+            "${criteria.period.checkOut}:" +
+            "${criteria.guestCount}:" +
+            "${criteria.page.page}:" +
+            "${criteria.page.size}"
+
+    private fun loadSearchPage(criteria: PropertySearchCriteria): PageResult<PropertySearchInfo> {
         val rows = propertyRepository.searchInfos(
             criteria.city,
             criteria.period,

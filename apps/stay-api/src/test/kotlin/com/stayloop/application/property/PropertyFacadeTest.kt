@@ -216,6 +216,63 @@ class PropertyFacadeTest {
         assertThat(searchWith(PropertySortKey.RECOMMENDED)).containsExactly(cheaper.id, premium.id)
     }
 
+    @DisplayName("search 는 동일 criteria 에 대해 두 번째 호출에서 cache hit 으로 응답한다 (PR4 A-4).")
+    @Test
+    fun shouldServeSearchFromCacheOnSecondCall() {
+        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+        val period = StayPeriod(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 3))
+        val roomType = saveRoomType(propertyId = property.id, name = "스탠다드", baseGuests = 2, maxGuests = 2)
+        seedAllDates(roomType.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 80_000)
+
+        val criteria = PropertySearchCriteria(
+            city = "SEOUL",
+            period = period,
+            guestCount = 2,
+            page = PageQuery(page = 0, size = 20),
+            sortKey = PropertySortKey.RECOMMENDED,
+        )
+
+        val first = sut.search(criteria)
+        assertThat(first.content).hasSize(1)
+
+        // Repository 상태를 *변경* — 새 Property 추가. cache 가 정상이면 두 번째 응답은 그대로 1건.
+        val newProperty = saveProperty(name = "추가호텔", city = "SEOUL")
+        val newRoom = saveRoomType(propertyId = newProperty.id, name = "신규", baseGuests = 2, maxGuests = 2)
+        seedAllDates(newRoom.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 70_000)
+
+        val second = sut.search(criteria)
+        // 새 Property 가 응답에 *없음* — cache hit 의 직접 증거
+        assertThat(second.content.map { it.propertyId }).containsExactly(property.id)
+    }
+
+    @DisplayName("search 의 cache 키는 city/sort/checkIn/checkOut/guests/page/size 모두 포함 — 일자가 다르면 다른 키로 miss 가 발생한다 (PR4 A-4 trade-off 박제).")
+    @Test
+    fun shouldUseSeparateCacheKeyPerPeriod() {
+        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+        val periodA = StayPeriod(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 3))
+        val periodB = StayPeriod(LocalDate.of(2026, 6, 5), LocalDate.of(2026, 6, 7))
+        val roomType = saveRoomType(propertyId = property.id, name = "스탠다드", baseGuests = 2, maxGuests = 2)
+        seedAllDates(roomType.id, periodA, totalRooms = 5, reservedRooms = 0, pricePerNight = 80_000)
+        seedAllDates(roomType.id, periodB, totalRooms = 5, reservedRooms = 0, pricePerNight = 100_000)
+
+        // 두 기간 검색 결과는 *다른 cache 키* — 각각 miss → load → put.
+        val criteriaA = PropertySearchCriteria(
+            city = "SEOUL",
+            period = periodA,
+            guestCount = 2,
+            page = PageQuery(page = 0, size = 20),
+            sortKey = PropertySortKey.RECOMMENDED,
+        )
+        val criteriaB = criteriaA.copy(period = periodB)
+
+        val responseA = sut.search(criteriaA)
+        val responseB = sut.search(criteriaB)
+
+        // 일자 따라 lowestTotalPrice 가 다름 — 두 응답이 *분리된 cache 엔트리* 임을 증명
+        assertThat(responseA.content.first().lowestTotalPrice).isEqualTo(Money.of(160_000))
+        assertThat(responseB.content.first().lowestTotalPrice).isEqualTo(Money.of(200_000))
+    }
+
     @DisplayName("getDetail 은 존재하지 않는 propertyId 에 NOT_FOUND 를 던진다.")
     @Test
     fun shouldThrowNotFoundOnUnknownPropertyId() {
