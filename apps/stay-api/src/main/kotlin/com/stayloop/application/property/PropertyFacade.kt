@@ -7,6 +7,7 @@ import com.stayloop.domain.common.value.Money
 import com.stayloop.domain.common.value.PageResult
 import com.stayloop.domain.inventory.DailyRoomInventoryModel
 import com.stayloop.domain.inventory.DailyRoomInventoryRepository
+import com.stayloop.domain.property.PropertyImageRepository
 import com.stayloop.domain.property.PropertyModel
 import com.stayloop.domain.property.PropertyRepository
 import com.stayloop.domain.property.RoomTypeModel
@@ -34,6 +35,7 @@ import org.springframework.transaction.annotation.Transactional
 class PropertyFacade(
     private val propertyRepository: PropertyRepository,
     private val roomTypeRepository: RoomTypeRepository,
+    private val propertyImageRepository: PropertyImageRepository,
     private val inventoryRepository: DailyRoomInventoryRepository,
     private val rateRepository: DailyRoomRateRepository,
     private val priceCalculator: ReservationPriceCalculator,
@@ -83,13 +85,17 @@ class PropertyFacade(
 
     /**
      * 단일 Property 의 정적 상세. 가용성 / 합산가는 별도 API.
+     *
+     * **이미지 조회 정책 (PR3, week5-b.md Loop 8'')**: PropertyImage 는 별도 AR — Facade 가 명시 호출. JPA
+     * `@OneToMany` 의 *암시적 lazy loading* 보다 *명시적 Repository 호출* 의 추적 / 테스트 가능성 우위.
      */
     @Transactional(readOnly = true)
     fun getDetail(propertyId: Long): PropertyDetailInfo {
         val property = propertyRepository.findById(propertyId)
             ?: throw CoreException(ErrorType.NOT_FOUND, "존재하지 않는 숙소입니다.")
         val roomTypes = roomTypeRepository.findByPropertyId(propertyId)
-        return PropertyDetailInfo.of(property, roomTypes)
+        val images = propertyImageRepository.findByPropertyId(propertyId)
+        return PropertyDetailInfo.of(property, roomTypes, images)
     }
 
     /**

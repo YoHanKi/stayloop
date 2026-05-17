@@ -33,7 +33,16 @@ data class PropertyDetailInfo(
     val roomTypes: List<RoomTypeInfo>,
 ) {
     companion object {
-        fun of(property: PropertyModel, roomTypes: List<RoomTypeModel>): PropertyDetailInfo =
+        /**
+         * `images` 는 PropertyImage AR 의 별도 조회 결과를 *외부에서* 주입 (`docs/plan/week5-b.md` Loop 8'' —
+         * PR3 에서 별도 AR 로 분리). Property 가 `@OneToMany` 로 들고 있지 않으므로 Facade 가
+         * `PropertyImageRepository.findByPropertyId(propertyId)` 로 조회해 전달.
+         */
+        fun of(
+            property: PropertyModel,
+            roomTypes: List<RoomTypeModel>,
+            images: List<PropertyImageModel>,
+        ): PropertyDetailInfo =
             PropertyDetailInfo(
                 propertyId = property.id,
                 name = property.name.value,
@@ -49,7 +58,7 @@ data class PropertyDetailInfo(
                 checkInTime = property.policy.checkInTime,
                 checkOutTime = property.policy.checkOutTime,
                 cancellationPolicy = property.policy,
-                images = property.images.map(PropertyImageInfo::from),
+                images = images.map(PropertyImageInfo::from),
                 roomTypes = roomTypes.map(RoomTypeInfo::from),
             )
     }

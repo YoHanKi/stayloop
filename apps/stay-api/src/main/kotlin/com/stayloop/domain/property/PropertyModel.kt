@@ -10,22 +10,24 @@ import com.stayloop.domain.property.value.Rating
 import com.stayloop.domain.property.value.StarRating
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
-import jakarta.persistence.CascadeType
 import jakarta.persistence.Column
 import jakarta.persistence.Embedded
 import jakarta.persistence.Entity
 import jakarta.persistence.EnumType
 import jakarta.persistence.Enumerated
-import jakarta.persistence.FetchType
 import jakarta.persistence.Index
-import jakarta.persistence.JoinColumn
-import jakarta.persistence.OneToMany
-import jakarta.persistence.OrderBy
 import jakarta.persistence.Table
 
 /**
  * 숙소 Aggregate Root. (`docs/design/03-class-diagram.md §1`)
- * 자식 entity: `PropertyImage` (갤러리). 다른 도메인(RoomType / Wishlist / Reservation) 은 별도 AR 로 ID 참조만.
+ *
+ * **자식 entity 없음** (PR3 정책 변경). 다른 도메인 (RoomType / Wishlist / Reservation / **PropertyImage**) 은
+ * *별도 AR 로 분리*, `propertyId: Long` 참조 컬럼으로 연결. `@OneToMany` / `@JoinColumn` 미사용 — *암시적
+ * 라이프사이클 관리* (JPA dirty checking 의 자동 INSERT/DELETE) 보다 *명시적 Repository 호출* 우위.
+ *
+ * **`mainImageUrl` 캐시**: search projection 의 비정규화 필드. `PropertyImageModel` 의 `is_main = TRUE` row 의
+ * URL 을 Property 가 *들고 있는 캐시*. 이미지 변경 흐름 (어드민) 합류 시 *Facade 가 양쪽 sync* (현 라운드
+ * 미구현 — week6+ 인계).
  */
 @Entity
 @Table(
@@ -91,21 +93,6 @@ class PropertyModel internal constructor(
     var wishCount: Int = wishCount
         protected set
 
-    /**
-     * 이미지 갤러리 — Property AR 의 자식 entity.
-     * 직접 노출하지 않고 `addImage` / `replaceMainImage` 등 메서드로만 변경.
-     *
-     * `@OrderBy("displayOrder ASC, id ASC")` — 1차 키(`displayOrder`)가 동률일 때
-     * 2차 키(`id`)로 안정 정렬을 보장 (verify-code §4 — 단일 키만으로는 동률 비결정).
-     */
-    @OneToMany(cascade = [CascadeType.ALL], orphanRemoval = true, fetch = FetchType.LAZY)
-    @JoinColumn(name = "property_id")
-    @OrderBy("displayOrder ASC, id ASC")
-    private val _images: MutableList<PropertyImageModel> = mutableListOf()
-
-    val images: List<PropertyImageModel>
-        get() = _images.toList()
-
     init {
         if (wishCount < 0) {
             throw CoreException(ErrorType.BAD_REQUEST, "wishCount 는 음수일 수 없습니다.")
@@ -137,69 +124,17 @@ class PropertyModel internal constructor(
         wishCount -= 1
     }
 
-    /**
-     * 갤러리에 이미지 추가. `isMain = true` 인 경우 기존 main 의 플래그를 해제.
-     * 자식 entity 의 `propertyId` 는 부모의 `@JoinColumn` 이 채운다 — 호출자가 전달하지 않는다.
-     *
-     * **상태 변경 순서**: 검증/생성 → 기존 main 해제 → 컬렉션 추가 → 캐시 갱신.
-     * `PropertyImageModel.create()` 가 예외를 던지면 aggregate 상태가 변하지 않아야 함 (`verify-code §6` 가드).
-     */
-    fun addImage(imageUrl: String, altText: String? = null, displayOrder: Int = 0, isMain: Boolean = false): PropertyImageModel {
-        // 1) 입력 검증 + 자식 인스턴스 생성 — 실패 시 예외 (aggregate 상태 미변경)
-        val image = PropertyImageModel.create(
-            imageUrl = imageUrl,
-            altText = altText,
-            displayOrder = displayOrder,
-            isMain = isMain,
-        )
-        // 2) 검증 통과 후에야 기존 main 해제 + 컬렉션 추가
-        if (isMain) {
-            _images.forEach { it.unmarkAsMain() }
-        }
-        _images.add(image)
-        if (isMain) {
-            mainImageUrl = imageUrl
-        }
-        return image
-    }
-
-    /**
-     * 대표 이미지 교체. `mainImageUrl` 캐시 컬럼과 갤러리의 `is_main` 플래그를 함께 갱신 (`05 §2.0.3` 가드).
-     * **갤러리에 없는 URL 은 거절** — 캐시 컬럼과 갤러리의 단일 진실 원천 보호 (Copilot #4 가드).
-     */
-    fun replaceMainImage(imageUrl: String) {
-        if (imageUrl.isBlank()) {
-            throw CoreException(ErrorType.BAD_REQUEST, "대표 이미지 URL 은 비어 있을 수 없습니다.")
-        }
-        if (imageUrl.length > MAIN_IMAGE_URL_MAX_LENGTH) {
-            throw CoreException(
-                ErrorType.BAD_REQUEST,
-                "대표 이미지 URL 은 ${MAIN_IMAGE_URL_MAX_LENGTH}자 이하여야 합니다.",
-            )
-        }
-        val target = _images.firstOrNull { it.imageUrl == imageUrl }
-            ?: throw CoreException(
-                ErrorType.BAD_REQUEST,
-                "대표 이미지로 지정하려는 URL 이 갤러리에 없습니다: $imageUrl",
-            )
-        _images.forEach { it.unmarkAsMain() }
-        target.markAsMain()
-        mainImageUrl = imageUrl
-    }
-
     companion object {
         const val MAIN_IMAGE_URL_MAX_LENGTH: Int = 500
 
         /**
          * 신규 Property 생성 진입점.
          *
-         * **`mainImageUrl` 캐시 컬럼은 매개변수로 받지 않는다** — 대표 이미지는 반드시
-         * `addImage(isMain = true)` 또는 `replaceMainImage()` 를 통해서만 설정되어야
-         * 갤러리(`images`) ↔ `is_main` 플래그 ↔ `mainImageUrl` 캐시의 SSOT 가 유지된다.
-         * 갤러리에 없는 URL 이 캐시에만 들어가는 우회 경로를 차단하기 위함 (verify-code §5 가드).
+         * **`mainImageUrl` 캐시 컬럼은 매개변수로 받지 않는다** — 대표 이미지는 *PropertyImage AR* 의 `is_main = TRUE`
+         * row 를 Facade 가 *별도 흐름* 으로 등록한 후 Property.mainImageUrl 을 sync (week6+ 인계). 신규 Property
+         * 의 초기 상태는 *이미지 없음 → mainImageUrl null*.
          *
-         * JPA hydration 은 internal constructor 가 처리 — 그 경로에서는 DB 가
-         * 갤러리/캐시의 일관성을 보장한 상태로 들어온다.
+         * JPA hydration 은 internal constructor 가 처리 — 그 경로에서는 DB 가 캐시 값을 가져온다.
          */
         fun create(
             name: Name,

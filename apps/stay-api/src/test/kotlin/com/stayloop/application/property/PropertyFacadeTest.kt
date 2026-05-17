@@ -26,6 +26,7 @@ import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
 import com.stayloop.support.test.InMemoryDailyRoomInventoryRepository
 import com.stayloop.support.test.InMemoryDailyRoomRateRepository
+import com.stayloop.support.test.InMemoryPropertyImageRepository
 import com.stayloop.support.test.InMemoryPropertyRepository
 import com.stayloop.support.test.InMemoryRoomTypeRepository
 import org.assertj.core.api.Assertions.assertThat
@@ -39,6 +40,7 @@ import java.time.LocalTime
 class PropertyFacadeTest {
     private lateinit var properties: InMemoryPropertyRepository
     private lateinit var roomTypes: InMemoryRoomTypeRepository
+    private lateinit var propertyImages: InMemoryPropertyImageRepository
     private lateinit var inventories: InMemoryDailyRoomInventoryRepository
     private lateinit var rates: InMemoryDailyRoomRateRepository
     private lateinit var sut: PropertyFacade
@@ -46,12 +48,14 @@ class PropertyFacadeTest {
     @BeforeEach
     fun setUp() {
         roomTypes = InMemoryRoomTypeRepository()
+        propertyImages = InMemoryPropertyImageRepository()
         inventories = InMemoryDailyRoomInventoryRepository()
         rates = InMemoryDailyRoomRateRepository()
         properties = InMemoryPropertyRepository(roomTypes, rates)
         sut = PropertyFacade(
             propertyRepository = properties,
             roomTypeRepository = roomTypes,
+            propertyImageRepository = propertyImages,
             inventoryRepository = inventories,
             rateRepository = rates,
             priceCalculator = ReservationPriceCalculator(),
