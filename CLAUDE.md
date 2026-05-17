@@ -33,6 +33,7 @@ Stayloop — Spring Boot 3 + Kotlin 멀티모듈 숙박 예약 백엔드.
 | `create-pr` | 브랜치 컨벤션·커밋 prefix·`documents/feature/{topic}/pr.md` 골격·푸시·PR URL 산출 보조 | **사용자가 "PR 만들어줘" 등으로 명시적으로 요청할 때만 호출.** 자동 게이트로 사용하지 않는다. |
 | `record-decision` | 주차 plan 진행 중 내려진 *주요 의사결정* (대안 비교 / 선택 / 근거 / 트레이드오프) 을 `docs/plan/week{n}/decision.md` 에 누적 박제. | **사용자가 "결정 기록해줘" / "박제해줘" 등으로 명시적으로 요청할 때만 호출.** 자동 게이트 X. |
 | `experiment-recurse` | Testcontainers / k6 실험 결과 박제를 **재귀로 (최소 1회, 최대 3회)** 검토 — 가설 ↔ 측정 사이의 환경 / 시나리오 / 도구 의미론 / 라벨링 / 해석 / 통계적 유의성 / 가설 자체 의 7 축 허점 분류 (a 즉시 수정 / b 재실험 / c 영구 한계). | **실험 박제 작성 직후 *최소 1회*. 사용자가 "실험 검토해줘" / "허점 찾아줘" 등으로 명시 호출.** 자동 게이트 X. |
+| `k6-load-runbook` | k6 부하 실행의 *절차적 가드* — Grafana/Prometheus 환경 구축 + 사용자 *명시 신호* 대기 + 측정 *중* 유의 메트릭 (5xx / HikariCP pending / JVM heap / Tomcat busy 등 우선순위) + red flag 패턴 + 박제 형식. | **모든 k6 부하 실행 *전* 본 skill 의 절차를 답습**. 사용자가 "k6 시작해줘" / "부하 측정해줘" 등으로 명시 요청 또는 Claude 가 발사 직전 호출. |
 
 ## Plan 구조 (주차)
 
@@ -69,27 +70,13 @@ Stayloop — Spring Boot 3 + Kotlin 멀티모듈 숙박 예약 백엔드.
 
 ### k6 부하 실행 정책 (사용자 모니터링 확인 대기 의무)
 
-k6 부하 테스트를 실행할 때는 *반드시* 사용자가 *실시간 모니터링* 할 수 있는 환경을 먼저 구축하고, 사용자의 *명시 신호* 를 받은 후에 부하를 발사한다. Claude 가 *임의로* k6 를 실행하지 않는다.
+**핵심 룰**: k6 부하 테스트는 *반드시* (a) Grafana/Prometheus 모니터링 환경을 먼저 구축하고, (b) 사용자의 *명시 신호* (예: "준비됐다", "시작해") 를 받은 후에 발사한다. Claude 가 *임의로* k6 를 실행하지 않는다.
 
-**필수 절차** (모든 k6 부하 실행 시):
-1. **Grafana / Prometheus 부팅** — `docker-compose -f ./docker/monitoring-compose.yml up -d`. Prometheus 가 stay-api 의 `/actuator/prometheus` 를 5초마다 스크랩하는지 확인 (`docker/grafana/prometheus.yml` 의 target `host.docker.internal:8082` — 로컬 wslrelay 가 8081 을 점유하는 경우 `MANAGEMENT_SERVER_PORT=8082` env 로 override 정합).
-2. **대시보드 접속 안내** — Grafana `http://localhost:3000` (admin/admin), `Stayloop / k6 Load Test (stay-api)` 대시보드 (`docker/grafana/provisioning/dashboards/stayloop-k6-load.json` provisioning 자동 등록).
-3. **stay-api 부팅** — `SPRING_PROFILES_ACTIVE=local MANAGEMENT_SERVER_PORT=8082 ./gradlew :apps:stay-api:bootRun`. 부팅 완료 ("Started StayApiApplication") 확인.
-4. **사용자 확인 대기** — *"Grafana 에서 시계열이 흐르는 게 확인되면 알려달라"* 의 명시 요청을 보내고 *응답 대기*. Claude 가 자체 판단으로 k6 발사 금지.
-5. **k6 발사** — 사용자가 *"준비됐다" / "시작해" / "쏴줘"* 등으로 명시 신호를 보낸 후에만 `k6 run k6/local/<scenario>.js` 실행.
+**왜**: k6 부하의 학습 자산은 *결과 박제* 가 아니라 *부하 중 거동* — 사용자가 *어디서 무엇이 꺾이는가* 를 *실시간 그래프* 로 봐야 *원인 추적* 이 가능. 결과 박제는 *사후 숫자* 일 뿐.
 
-**예외 없음** — *모든 k6 부하 실행* (시나리오 A/B/C/D/E/F/G 포함) 에 적용. CI 자동 부하는 본 정책 외 (week6+ 인계 영역).
+**상세 runbook 은 `k6-load-runbook` 스킬 참조** — 환경 구축 절차 / 측정 *중* 유의 메트릭 (5xx / HikariCP pending / JVM heap / Tomcat busy 등 우선순위) / red flag 패턴 / 박제 형식. Claude 가 k6 발사 전에 본 skill 의 절차를 답습.
 
-**모니터링 대시보드 패널** (`docker/grafana/provisioning/dashboards/stayloop-k6-load.json`):
-- HTTP Request Rate (RPS by URI / status) — k6 시나리오 부하 도달 확인
-- HTTP Duration p50 / p95 / p99 (by URI) — SLA 임계 시각화
-- 5xx Rate — 백프레셔 / pool exhaustion 시그널
-- JVM Memory Used (heap / non-heap) — 메모리 압박
-- HikariCP Connections (active / idle / pending) — DB 풀 상태
-- CPU Usage (process / system)
-- Tomcat Threads (busy / current) — accept queue 포화 시그널
-
-**왜 사용자 확인이 의무인가**: k6 부하는 *수십 초 ~ 분 단위* 의 *실시간 거동* 을 사용자가 직접 봐야 *어디서 무엇이 꺾이는가* 를 학습 자산으로 박는다. 결과 박제 (`k6-results.md`) 는 *사후 숫자*, 실시간 그래프는 *원인 추적의 SSOT*. Claude 가 임의 실행 시 사용자는 *결과만* 보고 *과정* 을 잃는다.
+**적용 범위**: *모든 k6 부하 실행* (시나리오 A/B/C/D/E/F/G 포함). CI 자동 부하는 본 정책 외 (week6+ 인계).
 
 ## 도메인 / 아키텍처
 
