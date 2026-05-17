@@ -49,6 +49,32 @@ Stayloop — Spring Boot 3 + Kotlin 멀티모듈 숙박 예약 백엔드.
 
 주차 plan 은 두 짝 + decision log 의 세 문서로 구성한다 — 정형 예시 `docs/plan/week5-b.md` + `docs/plan/week5.md` + `docs/plan/week5/decision.md`. 작성 절차 / 매핑 규약 / SSOT 분담은 `create-plan` / `record-decision` SKILL.md 참조.
 
+## 주차 plan PR 진행 정책 (Phase-by-Phase 확인)
+
+사용자가 `"week{n} 진행"`, `"PR{n} 진행"`, `"D-{n} 진행"` 등 *주차 plan 의 PR 단위 작업* 을 요청하면, Claude 는 **Phase 단위로 사용자 확인을 받으며 진행** 한다. 다단계 작업을 *자동으로 묶어서* 한 번에 실행하지 않는다.
+
+**적용 범위**: `docs/plan/week{n}.md` 의 PR / Phase / D-N 으로 구획된 단위 작업. PR3 / PR4 처럼 *Phase A (구현) → Phase M (측정 비교군) → Phase L (k6 부하)* 와 같이 복수 Phase 로 나뉜 작업이 대표.
+
+**절차** — Claude 는 매 Phase 시작 전에 다음을 사용자에게 확인한다:
+
+1. **현재 위치 박제** — 어떤 PR / Phase / 하위 단계 (A-1, A-2, …) 에 있는지 한 줄.
+2. **선택지 제시** — `AskUserQuestion` 으로 *다음 진행 옵션* 과 *트레이드오프* 를 1~4 개 박제 (예: "Phase M 6 조합 비교 측정 / Phase L k6 부하 / 다른 PR 로 전환").
+3. **사용자 명시 응답 대기** — 사용자가 옵션을 선택하거나 `"해줘"` / `"진행해줘"` 로 확정한 *후에만* 다음 Phase 실행.
+4. **Phase 내 sub-단계도 분리** — A-1 → A-2 → A-3 ... 처럼 sub-단계가 있으면 각 sub-단계 종료 시 다음 sub-단계 진입 전 동일 절차 반복.
+5. **commit 도 Phase 단위** — Phase 가 끝나면 commit 후 다음 Phase 진입 *전* 사용자 확인.
+
+**금지**:
+- 사용자가 `"PR4 진행해줘"` 라고만 했다고 *Phase A → M → L 전체 자동 실행 금지*. Phase A 만 시작하고 Phase M 진입 전 확인.
+- 여러 PR 을 묶어 자동 진행 금지 — PR4 끝나면 PR5 진입 전 확인.
+- `"모두 진행해줘"` 명시 요청이 있어도 *위험 / 비가역 단계* (k6 부하 / DB 마이그레이션 적용 / push) 는 별도 확인 유지.
+
+**예외 (자동 진행 허용)**:
+- `verify-code` → `verify-architecture` → `verify-tests` 자동 게이트 chain (앞 단계 PASS 시 다음 자동).
+- 단일 Phase 내 *불가분* 작업 (예: `searchInfos` projection 코드 변경 + 그 변경에 대한 테스트 추가는 한 묶음).
+- 사용자가 명시적으로 `"끝까지 한 번에 가도 돼"` / `"Phase A 부터 L 까지 다 해도 돼"` 라고 *해당 범위를 콕 집어* 허용한 경우.
+
+**참조 사례 (PR4 / D-4 캐싱)**: Phase A 는 A-1 (CacheStore SPI) → A-2 (PropertyFacade detail/search) → A-3 (afterCommit evict) → A-4 (Availability cache) → A-5 (reserve/cancel evict) → A-6 (테스트) 의 6 단계로 나뉘었고, 매 단계 종료 시 commit + 다음 단계 진입 전 사용자 확인을 받았다. Phase M / Phase L 은 다음 세션 사용자 신호 대기 중. 본 패턴이 표준.
+
 ## 실험 테스트
 
 트레이드오프 결정 (락 / timeout / JPA 옵션 / 격리 수준) 은 *비즈니스 직관* 만으로 박제하지 않는다. Testcontainers 통합 또는 k6 부하로 가설을 반증 가능하게 측정한 뒤 결정한다. 워크플로 (가설 → 설계 → 실행 → 박제 → 재귀 검토 → 코드 삭제) / Skip 조건 / 박제 위치는 `experiment-recurse` SKILL.md 참조.
