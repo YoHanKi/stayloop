@@ -20,7 +20,6 @@ import com.stayloop.domain.property.value.PropertyCategory
 import com.stayloop.domain.property.value.PropertyPolicy
 import com.stayloop.domain.property.value.Rating
 import com.stayloop.domain.rate.DailyRoomRateModel
-import com.stayloop.domain.rate.ReservationPriceCalculator
 import com.stayloop.domain.reservation.value.StayPeriod
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
@@ -45,6 +44,7 @@ class PropertyFacadeTest {
     private lateinit var inventories: InMemoryDailyRoomInventoryRepository
     private lateinit var rates: InMemoryDailyRoomRateRepository
     private lateinit var cacheStore: InMemoryCacheStore
+    private lateinit var availabilityCacheStoreForTest: com.stayloop.infrastructure.cache.AvailabilityCacheStore
     private lateinit var sut: PropertyFacade
 
     @BeforeEach
@@ -55,14 +55,15 @@ class PropertyFacadeTest {
         rates = InMemoryDailyRoomRateRepository()
         properties = InMemoryPropertyRepository(roomTypes, rates, inventories)
         cacheStore = InMemoryCacheStore()
+        availabilityCacheStoreForTest = com.stayloop.infrastructure.cache.AvailabilityCacheStore(cacheStore)
         sut = PropertyFacade(
             propertyRepository = properties,
             roomTypeRepository = roomTypes,
             propertyImageRepository = propertyImages,
             inventoryRepository = inventories,
             rateRepository = rates,
-            priceCalculator = ReservationPriceCalculator(),
             cacheStore = cacheStore,
+            availabilityCacheStore = availabilityCacheStoreForTest,
         )
     }
 
@@ -348,6 +349,42 @@ class PropertyFacadeTest {
         assertThat(byName["1인용"]?.unavailableReason).contains("최대 인원")
         assertThat(byName["FULL"]?.available).isFalse()
         assertThat(byName["FULL"]?.unavailableReason).contains("재고")
+    }
+
+    @DisplayName("getAvailableRooms 는 두 번째 호출에서 availability cache hit 으로 응답한다 (PR4 A-5b).")
+    @Test
+    fun shouldServeAvailabilityFromCacheOnSecondCall() {
+        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+        val room = saveRoomType(propertyId = property.id, name = "스탠다드", baseGuests = 2, maxGuests = 2)
+        val period = StayPeriod(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 3))
+        seedAllDates(room.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 100_000)
+
+        val first = sut.getAvailableRooms(
+            RoomAvailabilityQuery(propertyId = property.id, period = period, guestCount = 2),
+        )
+        assertThat(first.single().available).isTrue()
+        assertThat(first.single().totalPrice).isEqualTo(Money.of(200_000))
+
+        // Repository 상태 변경 — 재고를 모두 잠궈도 cache hit 으로 옛 응답 유지.
+        period.datesToReserve().forEach { date ->
+            val inventory = inventories.findById(room.id, date)
+                ?: error("inventory ${room.id}/$date 누락")
+            repeat(5) { inventory.reserveOne() }
+            inventories.save(inventory)
+        }
+
+        val second = sut.getAvailableRooms(
+            RoomAvailabilityQuery(propertyId = property.id, period = period, guestCount = 2),
+        )
+        // 새 reserved 상태가 cache 응답에는 *없음* — cache hit 의 직접 증거
+        assertThat(second.single().available).isTrue()
+
+        // 명시적 evict 후 재호출 — 새 상태 (재고 0) 반영
+        availabilityCacheStoreForTest.evictForDates(room.id, period.datesToReserve())
+        val refreshed = sut.getAvailableRooms(
+            RoomAvailabilityQuery(propertyId = property.id, period = period, guestCount = 2),
+        )
+        assertThat(refreshed.single().available).isFalse()
     }
 
     private fun saveProperty(

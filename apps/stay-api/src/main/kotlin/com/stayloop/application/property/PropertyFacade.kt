@@ -10,14 +10,16 @@ import com.stayloop.domain.property.PropertyRepository
 import com.stayloop.domain.property.RoomTypeModel
 import com.stayloop.domain.property.RoomTypeRepository
 import com.stayloop.domain.rate.DailyRoomRateRepository
-import com.stayloop.domain.rate.ReservationPriceCalculator
 import com.stayloop.domain.reservation.value.StayPeriod
+import com.stayloop.infrastructure.cache.AvailabilityCacheStore
 import com.stayloop.infrastructure.cache.CacheStore
+import com.stayloop.infrastructure.cache.RoomDailyAvailability
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.Duration
+import java.time.LocalDate
 
 /**
  * Property 검색·상세 (시퀀스 1) Facade. (`docs/design/02-sequence-diagram.md §1`)
@@ -36,8 +38,8 @@ class PropertyFacade(
     private val propertyImageRepository: PropertyImageRepository,
     private val inventoryRepository: DailyRoomInventoryRepository,
     private val rateRepository: DailyRoomRateRepository,
-    private val priceCalculator: ReservationPriceCalculator,
     private val cacheStore: CacheStore,
+    private val availabilityCacheStore: AvailabilityCacheStore,
 ) {
     companion object {
         private const val DETAIL_KEY_PREFIX = "property:detail:"
@@ -180,6 +182,19 @@ class PropertyFacade(
 
     /**
      * 객실 타입 단건의 가용성 + 합산가 / 인원 초과 / 일자 누락 / 재고 부족 사유 분기.
+     *
+     * **캐시 정책 (PR4 D-4, A-5b)**: `AvailabilityCacheStore.loadForRange(rtId, from, to, loader)` 로 RT × date
+     * 단위 cache 통과. miss 인 일자만 [loadAvailabilityForMissing] 이 inventory + rate 를 함께 fetch 해
+     * `RoomDailyAvailability` 로 변환 → cache put.
+     *
+     * **부분 hit 최적화 미적용**: miss 가 한 일자라도 있으면 loader 가 *전체 구간* `findAllInRange` 호출.
+     * 부분 hit 비율이 낮은 (TTL 10s) 본 시나리오에서는 비용 무시 가능 — Phase M 측정에서 확인.
+     *
+     * **`RoomDailyAvailability.pricePerNight` 합산**: cache 가 inventory + rate 를 한 단위로 묶어 `pricePerNight`
+     * 직접 sum. 기존 `priceCalculator.totalPrice(rates)` 대체 — 합산 로직이 *cache 직렬화 단위* 와 1:1.
+     *
+     * **결제 금지 (D-5 contract)**: 본 메서드 응답을 *결제 흐름 (`ReservationFacade.reserve`)* 의 결정 근거로
+     * 사용 금지. reserve 는 비관적 락으로 DB 행 직접 잡고 재확인 — PR5 가 회귀 가드 합류.
      */
     private fun roomTypeAvailability(
         roomType: RoomTypeModel,
@@ -193,23 +208,49 @@ class PropertyFacade(
             )
         }
         val expectedDates = period.datesToReserve()
-        val inventories = inventoryRepository.findAllInRange(roomType.id, period.checkIn, period.checkOut)
-        if (!hasAllDatesPresent(inventories.map { it.date }, expectedDates)) {
-            return RoomTypeAvailabilityInfo.unavailable(roomType, "기간 내 재고 정보가 누락되었습니다.")
+        val rows = availabilityCacheStore.loadForRange(
+            roomTypeId = roomType.id,
+            from = period.checkIn,
+            to = period.checkOut,
+        ) { missing ->
+            loadAvailabilityForMissing(roomType.id, period.checkIn, period.checkOut, missing)
         }
-        if (inventories.any { it.available() <= 0 }) {
+        if (rows.size != expectedDates.size || rows.map { it.date }.toSet() != expectedDates.toSet()) {
+            return RoomTypeAvailabilityInfo.unavailable(roomType, "기간 내 재고 또는 요금 정보가 누락되었습니다.")
+        }
+        if (rows.any { it.availableRooms <= 0 }) {
             return RoomTypeAvailabilityInfo.unavailable(roomType, "기간 내 재고가 부족한 일자가 있습니다.")
         }
-        val rates = rateRepository.findAllInRange(roomType.id, period.checkIn, period.checkOut)
-        if (!hasAllDatesPresent(rates.map { it.date }, expectedDates)) {
-            return RoomTypeAvailabilityInfo.unavailable(roomType, "기간 내 요금 정보가 누락되었습니다.")
-        }
-        val total = priceCalculator.totalPrice(rates)
+        val total = Money.of(rows.sumOf { it.pricePerNight })
         return RoomTypeAvailabilityInfo.available(roomType, total, period.nights())
     }
 
-    private fun hasAllDatesPresent(
-        actual: List<java.time.LocalDate>,
-        expected: List<java.time.LocalDate>,
-    ): Boolean = actual.size == expected.size && actual.toSet() == expected.toSet()
+    /**
+     * `AvailabilityCacheStore.loadForRange` 의 loader callback — miss 일자만 받지만 *전체 구간 fetch* 후 필터
+     * (Repository 가 `from..to` 단위 query 만 제공하므로). 부분 hit 시 약간의 over-fetch 가 발생하지만 본
+     * 시나리오의 TTL 10s 가정에서는 무시 가능.
+     */
+    private fun loadAvailabilityForMissing(
+        roomTypeId: Long,
+        from: LocalDate,
+        to: LocalDate,
+        missing: List<LocalDate>,
+    ): List<RoomDailyAvailability> {
+        if (missing.isEmpty()) return emptyList()
+        val missingSet = missing.toSet()
+        val invs = inventoryRepository.findAllInRange(roomTypeId, from, to).associateBy { it.date }
+        val rts = rateRepository.findAllInRange(roomTypeId, from, to).associateBy { it.date }
+        return missing.mapNotNull { date ->
+            if (date !in missingSet) return@mapNotNull null
+            val inv = invs[date] ?: return@mapNotNull null
+            val rate = rts[date] ?: return@mapNotNull null
+            RoomDailyAvailability(
+                roomTypeId = roomTypeId,
+                date = date,
+                totalRooms = inv.totalRooms,
+                reservedRooms = inv.reservedRooms,
+                pricePerNight = rate.pricePerNight.amount,
+            )
+        }
+    }
 }
