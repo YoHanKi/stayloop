@@ -51,7 +51,7 @@ class PropertyFacadeTest {
         propertyImages = InMemoryPropertyImageRepository()
         inventories = InMemoryDailyRoomInventoryRepository()
         rates = InMemoryDailyRoomRateRepository()
-        properties = InMemoryPropertyRepository(roomTypes, rates)
+        properties = InMemoryPropertyRepository(roomTypes, rates, inventories)
         sut = PropertyFacade(
             propertyRepository = properties,
             roomTypeRepository = roomTypes,
