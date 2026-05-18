@@ -53,7 +53,7 @@ Stayloop — Spring Boot 3 + Kotlin 멀티모듈 숙박 예약 백엔드.
 
 사용자가 `"week{n} 진행"`, `"PR{n} 진행"`, `"D-{n} 진행"` 등 *주차 plan 의 PR 단위 작업* 을 요청하면, Claude 는 **Phase 단위로 사용자 확인을 받으며 진행** 한다. 다단계 작업을 *자동으로 묶어서* 한 번에 실행하지 않는다.
 
-**적용 범위**: `docs/plan/week{n}.md` 의 PR / Phase / D-N 으로 구획된 단위 작업. PR3 / PR4 처럼 *Phase A (구현) → Phase M (측정 비교군) → Phase L (k6 부하)* 와 같이 복수 Phase 로 나뉜 작업이 대표.
+**적용 범위**: `docs/plan/week{n}.md` 의 PR / Phase / D-N 으로 구획된 단위 작업. *Phase A (구현) → Phase M (측정 비교군) → Phase L (k6 부하)* 와 같이 복수 Phase 로 나뉜 작업이 대표.
 
 **절차** — Claude 는 매 Phase 시작 전에 다음을 사용자에게 확인한다:
 
@@ -70,10 +70,8 @@ Stayloop — Spring Boot 3 + Kotlin 멀티모듈 숙박 예약 백엔드.
 
 **예외 (자동 진행 허용)**:
 - `verify-code` → `verify-architecture` → `verify-tests` 자동 게이트 chain (앞 단계 PASS 시 다음 자동).
-- 단일 Phase 내 *불가분* 작업 (예: `searchInfos` projection 코드 변경 + 그 변경에 대한 테스트 추가는 한 묶음).
-- 사용자가 명시적으로 `"끝까지 한 번에 가도 돼"` / `"Phase A 부터 L 까지 다 해도 돼"` 라고 *해당 범위를 콕 집어* 허용한 경우.
-
-**참조 사례 (PR4 / D-4 캐싱)**: Phase A 는 A-1 (CacheStore SPI) → A-2 (PropertyFacade detail/search) → A-3 (afterCommit evict) → A-4 (Availability cache) → A-5 (reserve/cancel evict) → A-6 (테스트) 의 6 단계로 나뉘었고, 매 단계 종료 시 commit + 다음 단계 진입 전 사용자 확인을 받았다. Phase M / Phase L 은 다음 세션 사용자 신호 대기 중. 본 패턴이 표준.
+- 단일 Phase 내 *불가분* 작업 (예: 코드 변경 + 그 변경에 대한 테스트 추가는 한 묶음).
+- 사용자가 명시적으로 `"끝까지 한 번에 가도 돼"` / `"Phase A 부터 L 까지 다 해도 돼"` 라고 *해당 범위를 콕 집어* 허용한 경우. 단 *완주 우선 신호* 가 *plan 의 본질적 가설 검증 (Phase M 비교군 측정 / k6 baseline 짝)* 우회 권한은 아니다 — *세부 가설 검증 간소화* 결정은 별도 사용자 확인 필요.
 
 ## 실험 테스트
 
@@ -87,10 +85,12 @@ Stayloop — Spring Boot 3 + Kotlin 멀티모듈 숙박 예약 백엔드.
 - **`Co-Authored-By: Claude ...` 트레일러는 기본적으로 추가하지 않는다.** 일반 기능·버그·리팩토링·마이그레이션 커밋의 작성자는 사람이며, Claude 가 공동 작성자로 표기되면 git blame / 기여도 추적이 혼동된다.
 - 예외: 변경이 **CLAUDE.md** 또는 `.claude/skills/**` 에 한정된 경우 (= Claude 와의 협업 자체가 변경의 본질) 에 한해 `Co-Authored-By` 트레일러를 허용한다.
 
-### Md 박제 파일은 commit 금지 (사용자 로컬 검토용)
+### Md 박제 파일은 commit / push 금지 (사용자 로컬 검토용)
 
-Claude 는 *코드 / 테스트 / 마이그레이션 SQL* 만 자동으로 stage / commit 한다. 박제용 md 파일은 사용자가 직접 검토 후 본인 시점에 commit 할 로컬 산출물이라 Claude 가 `git add` / `git commit` 대상으로 삼지 않는다 (`-f` 강제 추가도 금지 — 사용자 명시 요청 시만).
+Claude 는 *코드 / 테스트 / 마이그레이션 SQL* 만 자동으로 stage / commit 한다. 박제용 md 파일은 사용자가 직접 검토 후 본인 시점에 commit 할 로컬 산출물이라 Claude 가 `git add` / `git commit` / `git push` 대상으로 삼지 않는다 (`-f` 강제 추가 / `.gitignore` 의 unignore 예외 추가도 금지 — 사용자 명시 요청 시만).
 
-대상: `docs/plan/week{n}-b.md`, `docs/plan/week{n}/decision.md`, `documents/feature/{topic}/comparison.md` / `k6-results.md` / `seed-load.md` / `experiments-results.md` 등.
+대상:
+- 박제 md: `docs/plan/week{n}-b.md`, `docs/plan/week{n}/decision.md`, `documents/feature/{topic}/comparison.md` / `k6-results.md` / `seed-load.md` / `experiments-results.md` 등.
+- **PR 본문 md**: `documents/feature/{topic}/pr.md` — `gh pr create --body-file` 로 GitHub 에 보내는 *일회성 본문* 이라 git 추적 대상 아님. 사용자가 검토 후 *PR 생성 직전* 에만 임시 unignore + commit + push. PR 머지 후 다음 라운드 어차피 본문 stale.
 
-예외: 사용자가 *명시적으로* "decision.md 커밋해줘" 등으로 요청한 경우만.
+예외: 사용자가 *명시적으로* "decision.md 커밋해줘" / "PR 만들어줘" 등으로 요청한 경우만. *push* 는 사용자가 *직접* 실행 (`gh pr create` / `git push`) — Claude 는 *commit 까지만* 자동, push 는 매번 사용자 확인.
