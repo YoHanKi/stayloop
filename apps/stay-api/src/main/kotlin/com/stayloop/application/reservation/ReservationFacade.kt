@@ -89,6 +89,21 @@ class ReservationFacade(
      * **부분 실패 롤백** — 단일 `@Transactional` 안에서 진행되므로 (a) 재고 차감 도중 throw, (b) 쿠폰 사용
      * 도중 throw, (c) 어떤 검증 실패라도 *전체 롤백* (week4-quests Implementation Quest "쿠폰, 일자별 재고,
      * 결제 금액 처리 등 하나라도 작업이 실패하면 모두 롤백" 정합).
+     *
+     * **결제 직전 DB 재확인 contract (PR5 D-5, week5.md PR5 A-1)**:
+     * - 본 메서드는 *`AvailabilityCacheStore` / `PropertyFacade.getAvailableRooms` / `search:result:*` cache*
+     *   의 응답을 **결정 근거로 사용하지 않는다**. 재고 / 가용성 판단은 *항상* `inventoryRepository.findInventoriesForUpdate`
+     *   가 *DB 직접 + 비관적 락* 으로 확인 — *cache 우회 강제*.
+     * - **사유 (Loop 8 §고민의 본질)**: `AvailabilityCacheStore` 의 *10s stale window* + `search:result:*`
+     *   의 *5m stale window* 가 *결제 흐름의 결정 근거가 되면* — 캐시 시점에 `reserved=0` 으로 박힌 row 가
+     *   *실제로는 다른 사용자에 의해 차감됨* → cache 결정 시 *더블부킹*. 비관적 락 (`findInventoriesForUpdate`)
+     *   이 SSOT (week4 Phase A, decision.md D-1).
+     * - **회귀 가드** (`ReservationCacheBypassTest`, PR5 A-2): cache 에 *stale row* (reserved=0) + DB 는
+     *   *최신* (reserved=total) 인 상태에서 `reserve` 호출 시 *DB 기준* `CoreException(CONFLICT)` throw 되어야
+     *   함. 본 메서드가 캐시 결정 시 통과 → 회귀.
+     * - **단방향 contract**: reserve 가 *cache 를 읽지 않는다* + *cache 가 reserve 결정에 영향을 안 준다*
+     *   의 2 방향이 *모두 정합*. 단 reserve commit *후* cache evict 는 의무 (PR4 A-5, `evictAvailabilityAfterCommit`)
+     *   — *결정* 이 아니라 *후속 일관성 보존*.
      */
     @Transactional
     fun reserve(command: ReserveCommand): ReservationInfo {
