@@ -62,3 +62,18 @@ verify-architecture 가 *import* 차원을 본다면 본 phase 는 **시그니�
 `@IdClass` / `@EmbeddedId` 의 PK 컬럼·순서와 동일한 `@Table(indexes = ...)` 보조 인덱스가 명시되면 — PK 자체가 같은 인덱스를 제공하므로 중복 인덱스가 쓰기 amplification + 스토리지 비용으로 누적. 단일 `@Id` 와 동일한 보조 인덱스도 동일. *다른* 접근 패턴 (자식 entity 의 `(parent_id, display_order)` / 비-PK 단독) 일 때만 명시한다. `@OneToMany(fetch = EAGER)` 는 명시적 이유 없으면 LAZY 권장.
 
 `Grep "indexes\s*=" path=apps/stay-api/src/main/kotlin` → `@IdClass` / `@EmbeddedId` / `@Id` 컬럼과 columnList 비교.
+
+## 성능 함정 — 인덱스 / 정렬 / OFFSET / EXPLAIN 어설션 (week5 PR5 D-7 합류)
+
+**`ORDER BY <비PK 컬럼>` SQL 의 인덱스 박제** — 정렬 컬럼이 *복합 인덱스의 prefix scan 가능 위치* 인지 본다. `WHERE city = ? ORDER BY wish_count DESC` 에서 `(city, wish_count DESC)` 인덱스 없이 `(city)` 만 있으면 *filesort* 발화 → 모수 클수록 메모리 / temp file 압박. *내려가는 정렬* 은 MySQL 8.0 descending B-Tree 활용. 정렬 컬럼이 *비정규화 캐시 컬럼* 이면 [캐시 / 역정규화 / SSOT 절] 와 짝.
+
+**OFFSET 깊은 페이지의 영구 한계** — `LIMIT N OFFSET M` 의 M 이 커질수록 *스킵 비용이 선형* (`M + N` row 스캔). page = 100 / size = 20 시 2000 row 스캔 후 20 반환. Cursor-based pagination 으로 전환해야 *깊은 페이지 latency 상한* 박제 가능 — 본 라운드 *영구 한계* 로 박제 (week5.md week6+ 인계). 새 페이지네이션 API 가 `Pageable` / OFFSET 그대로 도입되면 *깊은 페이지 SLA 박제 위치* 를 KDoc 에 명시.
+
+**EXPLAIN 어설션 강제 (D-7)** — 주요 검색·정렬 SQL 은 *통합 테스트에서 EXPLAIN 어설션* 으로 옵티마이저 plan 회귀를 차단한다:
+- `key == 'idx_...'` — 의도 인덱스가 *실제로* 선택됨
+- `Extra not contains 'Using filesort'` — 정렬이 인덱스 prefix scan 으로 처리됨
+- `rows < 임계` — 스캔 row 수가 예상 범위
+
+새 검색 / 정렬 / 다일자 SQL 이 추가되면 *동일 테스트 패턴* (`PropertyFacadeSearchSortTest` / `PropertySearchScenarioTest` 답습) 으로 어설션이 박혀야 한다. EXPLAIN 어설션이 누락된 새 SQL 은 P1 — 다음 라운드의 Dialect 업그레이드 / 옵티마이저 변경으로 silent 회귀.
+
+`Grep "ORDER BY" glob="**/*Repository*.kt"` → 정렬 SQL 추출 후 동일 테이블의 `Index` columnList 와 prefix scan 가능 여부 대조. `Grep "EXPLAIN" glob="**/test/**/*.kt"` → 어설션 위치 확인 후 새 SQL 의 어설션 누락 차단.

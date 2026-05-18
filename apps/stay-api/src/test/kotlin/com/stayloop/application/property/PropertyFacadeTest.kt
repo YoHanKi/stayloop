@@ -20,10 +20,10 @@ import com.stayloop.domain.property.value.PropertyCategory
 import com.stayloop.domain.property.value.PropertyPolicy
 import com.stayloop.domain.property.value.Rating
 import com.stayloop.domain.rate.DailyRoomRateModel
-import com.stayloop.domain.rate.ReservationPriceCalculator
 import com.stayloop.domain.reservation.value.StayPeriod
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
+import com.stayloop.support.test.InMemoryCacheStore
 import com.stayloop.support.test.InMemoryDailyRoomInventoryRepository
 import com.stayloop.support.test.InMemoryDailyRoomRateRepository
 import com.stayloop.support.test.InMemoryPropertyImageRepository
@@ -43,6 +43,8 @@ class PropertyFacadeTest {
     private lateinit var propertyImages: InMemoryPropertyImageRepository
     private lateinit var inventories: InMemoryDailyRoomInventoryRepository
     private lateinit var rates: InMemoryDailyRoomRateRepository
+    private lateinit var cacheStore: InMemoryCacheStore
+    private lateinit var availabilityCacheStoreForTest: com.stayloop.infrastructure.cache.AvailabilityCacheStore
     private lateinit var sut: PropertyFacade
 
     @BeforeEach
@@ -52,13 +54,16 @@ class PropertyFacadeTest {
         inventories = InMemoryDailyRoomInventoryRepository()
         rates = InMemoryDailyRoomRateRepository()
         properties = InMemoryPropertyRepository(roomTypes, rates, inventories)
+        cacheStore = InMemoryCacheStore()
+        availabilityCacheStoreForTest = com.stayloop.infrastructure.cache.AvailabilityCacheStore(cacheStore)
         sut = PropertyFacade(
             propertyRepository = properties,
             roomTypeRepository = roomTypes,
             propertyImageRepository = propertyImages,
             inventoryRepository = inventories,
             rateRepository = rates,
-            priceCalculator = ReservationPriceCalculator(),
+            cacheStore = cacheStore,
+            availabilityCacheStore = availabilityCacheStoreForTest,
         )
     }
 
@@ -212,6 +217,63 @@ class PropertyFacadeTest {
         assertThat(searchWith(PropertySortKey.RECOMMENDED)).containsExactly(cheaper.id, premium.id)
     }
 
+    @DisplayName("search 는 동일 criteria 에 대해 두 번째 호출에서 cache hit 으로 응답한다 (PR4 A-4).")
+    @Test
+    fun shouldServeSearchFromCacheOnSecondCall() {
+        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+        val period = StayPeriod(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 3))
+        val roomType = saveRoomType(propertyId = property.id, name = "스탠다드", baseGuests = 2, maxGuests = 2)
+        seedAllDates(roomType.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 80_000)
+
+        val criteria = PropertySearchCriteria(
+            city = "SEOUL",
+            period = period,
+            guestCount = 2,
+            page = PageQuery(page = 0, size = 20),
+            sortKey = PropertySortKey.RECOMMENDED,
+        )
+
+        val first = sut.search(criteria)
+        assertThat(first.content).hasSize(1)
+
+        // Repository 상태를 *변경* — 새 Property 추가. cache 가 정상이면 두 번째 응답은 그대로 1건.
+        val newProperty = saveProperty(name = "추가호텔", city = "SEOUL")
+        val newRoom = saveRoomType(propertyId = newProperty.id, name = "신규", baseGuests = 2, maxGuests = 2)
+        seedAllDates(newRoom.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 70_000)
+
+        val second = sut.search(criteria)
+        // 새 Property 가 응답에 *없음* — cache hit 의 직접 증거
+        assertThat(second.content.map { it.propertyId }).containsExactly(property.id)
+    }
+
+    @DisplayName("search 의 cache 키는 city/sort/checkIn/checkOut/guests/page/size 모두 포함 — 일자가 다르면 다른 키로 miss 가 발생한다 (PR4 A-4 trade-off 박제).")
+    @Test
+    fun shouldUseSeparateCacheKeyPerPeriod() {
+        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+        val periodA = StayPeriod(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 3))
+        val periodB = StayPeriod(LocalDate.of(2026, 6, 5), LocalDate.of(2026, 6, 7))
+        val roomType = saveRoomType(propertyId = property.id, name = "스탠다드", baseGuests = 2, maxGuests = 2)
+        seedAllDates(roomType.id, periodA, totalRooms = 5, reservedRooms = 0, pricePerNight = 80_000)
+        seedAllDates(roomType.id, periodB, totalRooms = 5, reservedRooms = 0, pricePerNight = 100_000)
+
+        // 두 기간 검색 결과는 *다른 cache 키* — 각각 miss → load → put.
+        val criteriaA = PropertySearchCriteria(
+            city = "SEOUL",
+            period = periodA,
+            guestCount = 2,
+            page = PageQuery(page = 0, size = 20),
+            sortKey = PropertySortKey.RECOMMENDED,
+        )
+        val criteriaB = criteriaA.copy(period = periodB)
+
+        val responseA = sut.search(criteriaA)
+        val responseB = sut.search(criteriaB)
+
+        // 일자 따라 lowestTotalPrice 가 다름 — 두 응답이 *분리된 cache 엔트리* 임을 증명
+        assertThat(responseA.content.first().lowestTotalPrice).isEqualTo(Money.of(160_000))
+        assertThat(responseB.content.first().lowestTotalPrice).isEqualTo(Money.of(200_000))
+    }
+
     @DisplayName("getDetail 은 존재하지 않는 propertyId 에 NOT_FOUND 를 던진다.")
     @Test
     fun shouldThrowNotFoundOnUnknownPropertyId() {
@@ -234,6 +296,33 @@ class PropertyFacadeTest {
         assertThat(info.city).isEqualTo("SEOUL")
         assertThat(info.roomTypes).hasSize(2)
         assertThat(info.roomTypes.map { it.name }).containsExactlyInAnyOrder("스탠다드", "디럭스")
+    }
+
+    @DisplayName("getDetail 은 두 번째 호출에서 cache hit 으로 응답하고 Repository 를 다시 조회하지 않는다 (PR4 A-2).")
+    @Test
+    fun shouldServeDetailFromCacheOnSecondCall() {
+        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+        saveRoomType(propertyId = property.id, name = "스탠다드", baseGuests = 2, maxGuests = 2)
+
+        val first = sut.getDetail(property.id)
+        // cache hit 검증 — 두 번째 호출이 첫 번째와 *완전히 동일한 인스턴스* (Info data class equality)
+        val second = sut.getDetail(property.id)
+        assertThat(second).isEqualTo(first)
+
+        // Repository 의 *실제 데이터 상태* 가 바뀌어도 cache 가 유지하는 옛 응답이 그대로 — cache hit 의 직접 증거.
+        // 본 Property 를 mutate (rating 갱신) 한 뒤 다시 getDetail 호출 — 여전히 *첫 호출* 의 응답이 와야 함.
+        val mutated = properties.findById(property.id)!!.also {
+            // Rating 은 protected set 라 직접 변경 X — 대신 새 객실 추가로 *Repository 상태* 만 변경
+            saveRoomType(propertyId = property.id, name = "스위트", baseGuests = 2, maxGuests = 6)
+        }
+        val third = sut.getDetail(property.id)
+        // 새 객실이 cache 응답에는 *없음* — cache hit 의 증거
+        assertThat(third.roomTypes.map { it.name }).containsExactly("스탠다드")
+
+        // 캐시 무효화 후 재호출은 새 상태 반영
+        cacheStore.evict("property:detail:${property.id}")
+        val refreshed = sut.getDetail(property.id)
+        assertThat(refreshed.roomTypes.map { it.name }).containsExactlyInAnyOrder("스탠다드", "스위트")
     }
 
     @DisplayName("getAvailableRooms 는 가용 / 인원 초과 / 재고 부족 / 일자 누락을 사유와 함께 노출한다.")
@@ -260,6 +349,42 @@ class PropertyFacadeTest {
         assertThat(byName["1인용"]?.unavailableReason).contains("최대 인원")
         assertThat(byName["FULL"]?.available).isFalse()
         assertThat(byName["FULL"]?.unavailableReason).contains("재고")
+    }
+
+    @DisplayName("getAvailableRooms 는 두 번째 호출에서 availability cache hit 으로 응답한다 (PR4 A-5b).")
+    @Test
+    fun shouldServeAvailabilityFromCacheOnSecondCall() {
+        val property = saveProperty(name = "강남호텔", city = "SEOUL")
+        val room = saveRoomType(propertyId = property.id, name = "스탠다드", baseGuests = 2, maxGuests = 2)
+        val period = StayPeriod(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 3))
+        seedAllDates(room.id, period, totalRooms = 5, reservedRooms = 0, pricePerNight = 100_000)
+
+        val first = sut.getAvailableRooms(
+            RoomAvailabilityQuery(propertyId = property.id, period = period, guestCount = 2),
+        )
+        assertThat(first.single().available).isTrue()
+        assertThat(first.single().totalPrice).isEqualTo(Money.of(200_000))
+
+        // Repository 상태 변경 — 재고를 모두 잠궈도 cache hit 으로 옛 응답 유지.
+        period.datesToReserve().forEach { date ->
+            val inventory = inventories.findById(room.id, date)
+                ?: error("inventory ${room.id}/$date 누락")
+            repeat(5) { inventory.reserveOne() }
+            inventories.save(inventory)
+        }
+
+        val second = sut.getAvailableRooms(
+            RoomAvailabilityQuery(propertyId = property.id, period = period, guestCount = 2),
+        )
+        // 새 reserved 상태가 cache 응답에는 *없음* — cache hit 의 직접 증거
+        assertThat(second.single().available).isTrue()
+
+        // 명시적 evict 후 재호출 — 새 상태 (재고 0) 반영
+        availabilityCacheStoreForTest.evictForDates(room.id, period.datesToReserve())
+        val refreshed = sut.getAvailableRooms(
+            RoomAvailabilityQuery(propertyId = property.id, period = period, guestCount = 2),
+        )
+        assertThat(refreshed.single().available).isFalse()
     }
 
     private fun saveProperty(

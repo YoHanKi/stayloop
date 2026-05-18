@@ -21,13 +21,17 @@ import com.stayloop.domain.reservation.value.RoomTypeSnapshot
 import com.stayloop.domain.reservation.value.StayPeriod
 import com.stayloop.domain.user.UserRepository
 import com.stayloop.domain.user.value.LoginId
+import com.stayloop.infrastructure.cache.AvailabilityCacheStore
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.dao.OptimisticLockingFailureException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import org.springframework.transaction.support.TransactionSynchronization
+import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.time.Clock
+import java.time.LocalDate
 import java.time.LocalDateTime
 
 /**
@@ -61,6 +65,7 @@ class ReservationFacade(
     private val couponTemplateRepository: CouponTemplateRepository,
     private val couponIssueService: CouponIssueService,
     private val userRepository: UserRepository,
+    private val availabilityCacheStore: AvailabilityCacheStore,
     private val clock: Clock,
 ) {
     /**
@@ -84,6 +89,21 @@ class ReservationFacade(
      * **부분 실패 롤백** — 단일 `@Transactional` 안에서 진행되므로 (a) 재고 차감 도중 throw, (b) 쿠폰 사용
      * 도중 throw, (c) 어떤 검증 실패라도 *전체 롤백* (week4-quests Implementation Quest "쿠폰, 일자별 재고,
      * 결제 금액 처리 등 하나라도 작업이 실패하면 모두 롤백" 정합).
+     *
+     * **결제 직전 DB 재확인 contract (PR5 D-5, week5.md PR5 A-1)**:
+     * - 본 메서드는 *`AvailabilityCacheStore` / `PropertyFacade.getAvailableRooms` / `search:result:*` cache*
+     *   의 응답을 **결정 근거로 사용하지 않는다**. 재고 / 가용성 판단은 *항상* `inventoryRepository.findInventoriesForUpdate`
+     *   가 *DB 직접 + 비관적 락* 으로 확인 — *cache 우회 강제*.
+     * - **사유 (Loop 8 §고민의 본질)**: `AvailabilityCacheStore` 의 *10s stale window* + `search:result:*`
+     *   의 *5m stale window* 가 *결제 흐름의 결정 근거가 되면* — 캐시 시점에 `reserved=0` 으로 박힌 row 가
+     *   *실제로는 다른 사용자에 의해 차감됨* → cache 결정 시 *더블부킹*. 비관적 락 (`findInventoriesForUpdate`)
+     *   이 SSOT (week4 Phase A, decision.md D-1).
+     * - **회귀 가드** (`ReservationCacheBypassTest`, PR5 A-2): cache 에 *stale row* (reserved=0) + DB 는
+     *   *최신* (reserved=total) 인 상태에서 `reserve` 호출 시 *DB 기준* `CoreException(CONFLICT)` throw 되어야
+     *   함. 본 메서드가 캐시 결정 시 통과 → 회귀.
+     * - **단방향 contract**: reserve 가 *cache 를 읽지 않는다* + *cache 가 reserve 결정에 영향을 안 준다*
+     *   의 2 방향이 *모두 정합*. 단 reserve commit *후* cache evict 는 의무 (PR4 A-5, `evictAvailabilityAfterCommit`)
+     *   — *결정* 이 아니라 *후속 일관성 보존*.
      */
     @Transactional
     fun reserve(command: ReserveCommand): ReservationInfo {
@@ -137,6 +157,9 @@ class ReservationFacade(
 
         inventoryRepository.saveAll(updatedInventories)
         val saved = reservationRepository.save(reservation)
+        // reserve 가 변경한 RT × dates 의 availability cache 를 TX commit 후 evict (PR4 A-5, D-4).
+        // stale cache 가 결제 후 다른 사용자의 검색·가용 조회에 누출되면 더블부킹 가능 (Loop 8 §고민의 본질).
+        evictAvailabilityAfterCommit(roomType.id, sortedDates)
 
         // 예약 저장으로 reservation.id 가 부여된 *후* 쿠폰 사용 처리 (CouponIssueService KDoc 의 시간 분리).
         // **동시성 변환** (`docs/plan/week4.md` ③ Phase B-2, verify-code §0-B CE-1 catch scope 정합) —
@@ -249,7 +272,10 @@ class ReservationFacade(
         )
 
         inventoryRepository.saveAll(updatedInventories)
-        return ReservationInfo.from(reservationRepository.save(cancelled))
+        val savedCancelled = reservationRepository.save(cancelled)
+        // cancel 이 복원한 RT × dates 의 availability cache 도 동일하게 afterCommit evict (PR4 A-5).
+        evictAvailabilityAfterCommit(reservation.roomTypeId, sortedDates)
+        return ReservationInfo.from(savedCancelled)
     }
 
     /**
@@ -280,6 +306,29 @@ class ReservationFacade(
     private fun requireOwner(reservation: ReservationModel, loginId: LoginId, action: String) {
         if (reservation.userId != loginId) {
             throw CoreException(ErrorType.FORBIDDEN, "본인 예약만 ${action}할 수 있습니다.")
+        }
+    }
+
+    /**
+     * `AvailabilityCacheStore` evict 를 *TX commit 후* 수행 (PR4 A-5, D-4).
+     *
+     * **TX 안 evict = race window (Loop 7 §고민 5)**: evict 후 DB rollback 시 *DB 는 옛 상태 / cache 는 비어있음*
+     * → 다음 read 가 옛 inventory 를 cache 재진입 → stale. **afterCommit 만 안전**.
+     *
+     * **TX 가 없으면 즉시 evict** — 단위 테스트 호환. 분기 로직 자체는 cache 의 *eventually evicted* 약속의
+     * 단순 경로.
+     */
+    private fun evictAvailabilityAfterCommit(roomTypeId: Long, dates: Collection<LocalDate>) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(
+                object : TransactionSynchronization {
+                    override fun afterCommit() {
+                        availabilityCacheStore.evictForDates(roomTypeId, dates)
+                    }
+                },
+            )
+        } else {
+            availabilityCacheStore.evictForDates(roomTypeId, dates)
         }
     }
 

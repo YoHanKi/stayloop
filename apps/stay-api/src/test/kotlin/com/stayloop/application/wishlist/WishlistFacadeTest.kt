@@ -38,6 +38,7 @@ class WishlistFacadeTest {
     private lateinit var users: InMemoryUserRepository
     private lateinit var properties: InMemoryPropertyRepository
     private lateinit var wishes: InMemoryWishlistRepository
+    private lateinit var cacheStore: com.stayloop.support.test.InMemoryCacheStore
     private lateinit var sut: WishlistFacade
     private val fixedClock: Clock = Clock.fixed(
         java.time.Instant.parse("2026-05-04T10:15:30Z"),
@@ -49,9 +50,11 @@ class WishlistFacadeTest {
         users = InMemoryUserRepository()
         properties = InMemoryPropertyRepository()
         wishes = InMemoryWishlistRepository(users)
+        cacheStore = com.stayloop.support.test.InMemoryCacheStore()
         sut = WishlistFacade(
             wishlistRepository = wishes,
             propertyRepository = properties,
+            cacheStore = cacheStore,
             clock = fixedClock,
         )
     }
@@ -109,6 +112,42 @@ class WishlistFacadeTest {
         assertThat(info.wished).isFalse()
         assertThat(info.wishCount).isEqualTo(0)
         assertThat(properties.findById(property.id)?.wishCount).isEqualTo(0)
+    }
+
+    @DisplayName("wish 는 detail cache 의 property:detail:{id} 를 evict 하여 다음 read 가 stale 응답을 피한다 (PR4 A-3).")
+    @Test
+    fun shouldEvictDetailCacheOnWish() {
+        val user = saveUser("alen01")
+        val property = saveProperty()
+        val cacheKey = "property:detail:${property.id}"
+        // 사전 박제 — getDetail 응답을 흉내낸 임의 payload (key 존재만 검증 목적)
+        cacheStore.put(cacheKey, "stale-detail-payload", java.time.Duration.ofMinutes(10))
+        assertThat(cacheStore.get(cacheKey, String::class.java)).isNotNull
+
+        sut.wish(user.loginId, property.id)
+
+        // TX 가 없는 단위 테스트 — Facade 의 분기 (`isSynchronizationActive() == false`) 에 따라 즉시 evict 수행.
+        assertThat(cacheStore.get(cacheKey, String::class.java)).isNull()
+    }
+
+    @DisplayName("unwish 는 실제 감소가 발생한 경우에만 detail cache 를 evict 한다 (이미 0 이면 noop, PR4 A-3).")
+    @Test
+    fun shouldEvictDetailCacheOnUnwishOnlyWhenAffected() {
+        val user = saveUser("alen01")
+        val property = saveProperty()
+        // 먼저 wish 로 카운트 1 (이 호출이 evict 도 실행) — 그 후 cache 재박제
+        sut.wish(user.loginId, property.id)
+        val cacheKey = "property:detail:${property.id}"
+        cacheStore.put(cacheKey, "stale-after-wish", java.time.Duration.ofMinutes(10))
+
+        // (1) 실제 감소 발생 (affected=1) — cache evict
+        sut.unwish(user.loginId, property.id)
+        assertThat(cacheStore.get(cacheKey, String::class.java)).isNull()
+
+        // (2) 멱등 unwish (이미 0) — cache 가 박제되어 있어도 evict 호출 안 됨
+        cacheStore.put(cacheKey, "should-survive-noop-unwish", java.time.Duration.ofMinutes(10))
+        sut.unwish(user.loginId, property.id)
+        assertThat(cacheStore.get(cacheKey, String::class.java)).isEqualTo("should-survive-noop-unwish")
     }
 
     @DisplayName("wish 는 존재하지 않는 propertyId 에 대해 NOT_FOUND 를 던진다.")

@@ -45,9 +45,52 @@ Stayloop — Spring Boot 3 + Kotlin 멀티모듈 숙박 예약 백엔드.
 - **Entity / VO / Domain Service 구분, 레이어드 + DIP** — `docs/presentation/week3.md`.
 - **검수 규칙** — `.claude/skills/verify-architecture/SKILL.md`.
 
+## 코드 주석 정책 (축약 우선)
+
+기본은 *주석 없음*. 잘 명명된 식별자와 짧은 함수가 *코드가 곧 문서* 의 1차 수단이다.
+
+**추가 시 — 한 줄만**: 새 주석은 *어떤 코드인지* 또는 *왜* 의 핵심만 한 줄로 박는다. 두 줄을 넘기면 *코드 자체로 표현 가능한지* 다시 본다 (함수 추출 / 변수명 / enum 분기).
+
+**유지 대상** — *결정 근거 / contract / 비자명 invariant* 만:
+- D-N decision 박제 (`decision.md` 와 짝, 코드가 그 결정의 *코드 위치* 임을 명시할 때)
+- contract 명문화 (예: D-5 *결제 흐름 cache 결정 금지* — KDoc 한 단락이 *contract SSOT*)
+- race window / 동시성 / TX 경계 / 비자명한 SQL 분기 같은 *읽는 사람이 코드만 봐서는 못 잡는 invariant*
+
+**제거 대상** — 발견 시 *코드 수정 사이클에* 같이 정리 (한 번에 일괄 X):
+- WHAT 설명 (`// users 리스트를 순회한다` — 코드가 이미 그것)
+- 자명한 동작 / 외부 문서 중복 (`docs/presentation/week3.md` 의 내용을 KDoc 에 복붙)
+- 변경 history / "이전에는 X 였다" / "TODO 후 삭제" 회고성 — git log / PR 본문이 SSOT
+- 길게 늘어진 KDoc 중 *결정 / contract / invariant 외의 산문* — 축약 또는 제거
+
+**축약 절차**: 코드 수정 시 같은 파일 상단 KDoc 을 *읽고*, *유지 대상* 만 남기고 나머지 줄을 같은 commit 에 정리. 별도 *주석 정리 commit* 분리 금지 — 본 정책은 *점진적 정리* 가 본질.
+
 ## Plan 구조 (주차)
 
 주차 plan 은 두 짝 + decision log 의 세 문서로 구성한다 — 정형 예시 `docs/plan/week5-b.md` + `docs/plan/week5.md` + `docs/plan/week5/decision.md`. 작성 절차 / 매핑 규약 / SSOT 분담은 `create-plan` / `record-decision` SKILL.md 참조.
+
+## 주차 plan PR 진행 정책 (Phase-by-Phase 확인)
+
+사용자가 `"week{n} 진행"`, `"PR{n} 진행"`, `"D-{n} 진행"` 등 *주차 plan 의 PR 단위 작업* 을 요청하면, Claude 는 **Phase 단위로 사용자 확인을 받으며 진행** 한다. 다단계 작업을 *자동으로 묶어서* 한 번에 실행하지 않는다.
+
+**적용 범위**: `docs/plan/week{n}.md` 의 PR / Phase / D-N 으로 구획된 단위 작업. *Phase A (구현) → Phase M (측정 비교군) → Phase L (k6 부하)* 와 같이 복수 Phase 로 나뉜 작업이 대표.
+
+**절차** — Claude 는 매 Phase 시작 전에 다음을 사용자에게 확인한다:
+
+1. **현재 위치 박제** — 어떤 PR / Phase / 하위 단계 (A-1, A-2, …) 에 있는지 한 줄.
+2. **선택지 제시** — `AskUserQuestion` 으로 *다음 진행 옵션* 과 *트레이드오프* 를 1~4 개 박제 (예: "Phase M 6 조합 비교 측정 / Phase L k6 부하 / 다른 PR 로 전환").
+3. **사용자 명시 응답 대기** — 사용자가 옵션을 선택하거나 `"해줘"` / `"진행해줘"` 로 확정한 *후에만* 다음 Phase 실행.
+4. **Phase 내 sub-단계도 분리** — A-1 → A-2 → A-3 ... 처럼 sub-단계가 있으면 각 sub-단계 종료 시 다음 sub-단계 진입 전 동일 절차 반복.
+5. **commit 도 Phase 단위** — Phase 가 끝나면 commit 후 다음 Phase 진입 *전* 사용자 확인.
+
+**금지**:
+- 사용자가 `"PR4 진행해줘"` 라고만 했다고 *Phase A → M → L 전체 자동 실행 금지*. Phase A 만 시작하고 Phase M 진입 전 확인.
+- 여러 PR 을 묶어 자동 진행 금지 — PR4 끝나면 PR5 진입 전 확인.
+- `"모두 진행해줘"` 명시 요청이 있어도 *위험 / 비가역 단계* (k6 부하 / DB 마이그레이션 적용 / push) 는 별도 확인 유지.
+
+**예외 (자동 진행 허용)**:
+- `verify-code` → `verify-architecture` → `verify-tests` 자동 게이트 chain (앞 단계 PASS 시 다음 자동).
+- 단일 Phase 내 *불가분* 작업 (예: 코드 변경 + 그 변경에 대한 테스트 추가는 한 묶음).
+- 사용자가 명시적으로 `"끝까지 한 번에 가도 돼"` / `"Phase A 부터 L 까지 다 해도 돼"` 라고 *해당 범위를 콕 집어* 허용한 경우. 단 *완주 우선 신호* 가 *plan 의 본질적 가설 검증 (Phase M 비교군 측정 / k6 baseline 짝)* 우회 권한은 아니다 — *세부 가설 검증 간소화* 결정은 별도 사용자 확인 필요.
 
 ## 실험 테스트
 
@@ -61,10 +104,12 @@ Stayloop — Spring Boot 3 + Kotlin 멀티모듈 숙박 예약 백엔드.
 - **`Co-Authored-By: Claude ...` 트레일러는 기본적으로 추가하지 않는다.** 일반 기능·버그·리팩토링·마이그레이션 커밋의 작성자는 사람이며, Claude 가 공동 작성자로 표기되면 git blame / 기여도 추적이 혼동된다.
 - 예외: 변경이 **CLAUDE.md** 또는 `.claude/skills/**` 에 한정된 경우 (= Claude 와의 협업 자체가 변경의 본질) 에 한해 `Co-Authored-By` 트레일러를 허용한다.
 
-### Md 박제 파일은 commit 금지 (사용자 로컬 검토용)
+### Md 박제 파일은 commit / push 금지 (사용자 로컬 검토용)
 
-Claude 는 *코드 / 테스트 / 마이그레이션 SQL* 만 자동으로 stage / commit 한다. 박제용 md 파일은 사용자가 직접 검토 후 본인 시점에 commit 할 로컬 산출물이라 Claude 가 `git add` / `git commit` 대상으로 삼지 않는다 (`-f` 강제 추가도 금지 — 사용자 명시 요청 시만).
+Claude 는 *코드 / 테스트 / 마이그레이션 SQL* 만 자동으로 stage / commit 한다. 박제용 md 파일은 사용자가 직접 검토 후 본인 시점에 commit 할 로컬 산출물이라 Claude 가 `git add` / `git commit` / `git push` 대상으로 삼지 않는다 (`-f` 강제 추가 / `.gitignore` 의 unignore 예외 추가도 금지 — 사용자 명시 요청 시만).
 
-대상: `docs/plan/week{n}-b.md`, `docs/plan/week{n}/decision.md`, `documents/feature/{topic}/comparison.md` / `k6-results.md` / `seed-load.md` / `experiments-results.md` 등.
+대상:
+- 박제 md: `docs/plan/week{n}-b.md`, `docs/plan/week{n}/decision.md`, `documents/feature/{topic}/comparison.md` / `k6-results.md` / `seed-load.md` / `experiments-results.md` 등.
+- **PR 본문 md**: `documents/feature/{topic}/pr.md` — `gh pr create --body-file` 로 GitHub 에 보내는 *일회성 본문* 이라 git 추적 대상 아님. 사용자가 검토 후 *PR 생성 직전* 에만 임시 unignore + commit + push. PR 머지 후 다음 라운드 어차피 본문 stale.
 
-예외: 사용자가 *명시적으로* "decision.md 커밋해줘" 등으로 요청한 경우만.
+예외: 사용자가 *명시적으로* "decision.md 커밋해줘" / "PR 만들어줘" 등으로 요청한 경우만. *push* 는 사용자가 *직접* 실행 (`gh pr create` / `git push`) — Claude 는 *commit 까지만* 자동, push 는 매번 사용자 확인.

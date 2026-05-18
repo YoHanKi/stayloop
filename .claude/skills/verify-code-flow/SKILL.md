@@ -64,6 +64,20 @@ null / 빈 입력이 *조용히* 정상 값으로 변환되면 버그가 늦게 
 
 **`@Lock(PESSIMISTIC_WRITE)` / `setLockMode(PESSIMISTIC_WRITE)` 메서드를 트랜잭션 밖에서 호출** 하면 락이 statement 종료 즉시 해제되어 비관적 락의 목적 자체가 무력화. **`saveAndFlush` 도 `@Transactional` 밖이면 자체 TX 로 commit 되어 호출 시점 throw 의미가 깨진다** — Facade try/catch 가 잡지 못함. 비관적 락 / saveAndFlush 의 트랜잭션 의무는 Repository 인터페이스 KDoc 에 박제.
 
+## 캐시 결정 흐름 / N+1 / 결제 직전 DB 재확인 (week5 PR5 D-5 합류)
+
+**N+1 회피 — 루프 안 Repository 호출 차단**: `.map { repo.findBy...(it) }` / `.forEach { repo.load(it) }` 같은 *컬렉션 순회 안의 단건 Repository 호출* 은 N+1. *projection 1쿼리* 또는 *batch IN (`findAllByIdIn`)* 으로 전환해야 한다 (week5 PR3 D-3 선례). 새 검색 / 상세 Facade 가 N+1 패턴으로 작성되면 *발행 SQL 어설션 통합 테스트* (Hibernate stat) 회귀 가드 의무.
+
+`Grep "forEach\s*\{[^}]*Repository" glob="**/*.kt"` / `Grep "\.map\s*\{[^}]*Repository" glob="**/*.kt"` → 루프 안 Repository 호출 의심 패턴.
+
+**결제 흐름 캐시 결정 금지 (D-5 contract)** — `ReservationFacade.reserve` / `cancel` 류의 *재고 / 금액 변경 흐름* 은 *cache 응답을 결정 근거로 사용 금지*. cache 의 stale window (PR4: `availability:*` 10s / `search:result:*` 5m) 가 결제 흐름의 결정 근거가 되면 *더블부킹*. 결정은 *비관적 락 + DB 직접* 만 (`findInventoriesForUpdate` 답습). 회귀 가드 = `ReservationCacheBypassTest` (PR5 Phase A-2 답습 — cache stale 박제 + DB 최신 → reserve CONFLICT throw 어설션).
+
+새 결제 / 환불 / 재고 변경 Facade 가 *cache 응답을 if 조건 / 분기 결정* 에 사용하면 P1. `@Transactional` 안에서 *cache get → 분기* 패턴 grep — `cacheStore.get(...)` / `availabilityCacheStore.loadForRange` 가 *읽기 흐름 (`PropertyFacade`)* 외 위치에 등장하면 D-5 contract 위반 의심.
+
+**TX commit 후 evict 강제 (`afterCommit`)** — cache evict 는 *TransactionSynchronizationManager.registerSynchronization(afterCommit)* 안에서만. TX 안 직접 evict 는 *race window* — evict 후 DB rollback 시 *cache 비어있음 + DB 옛 상태* → 다음 read 가 옛 값을 cache 재진입 → stale. 답습 위치: `WishlistFacade.wish/unwish` / `ReservationFacade.reserve/cancel` (PR4 A-3 / A-5a).
+
+새 mutation Facade 가 cache evict 호출 시 *afterCommit 분기 미적용* + *TX 없음 시 즉시 evict 분기 미적용* 패턴이면 P1. `Grep "cacheStore\.evict|CacheStore\.evict" glob="**/*Facade.kt"` → evict 호출 시 `TransactionSynchronizationManager.registerSynchronization` 가 *같은 메서드* 에 등장하는지 짝 검증.
+
 ## 외부 입력 ↔ 내부 매핑 (Whitelisting)
 
 도메인 어휘 (정렬 키, 필터 키, 카테고리) 가 인프라 / SQL 식별자로 변환될 때 화이트리스트 없으면 잘못된 path / SQL / 500. `map[key] ?: key` 형태의 fallback, `@Embedded` VO 정렬 키에 `vo.value` 누락, enum 변환 `valueOf` 직접 사용, **외부 입력 silent ignore** (`PageQuery.sort` 받아놓고 항상 고정 정렬) 는 모두 지적.
