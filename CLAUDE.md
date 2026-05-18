@@ -45,6 +45,25 @@ Stayloop — Spring Boot 3 + Kotlin 멀티모듈 숙박 예약 백엔드.
 - **Entity / VO / Domain Service 구분, 레이어드 + DIP** — `docs/presentation/week3.md`.
 - **검수 규칙** — `.claude/skills/verify-architecture/SKILL.md`.
 
+## 코드 주석 정책 (축약 우선)
+
+기본은 *주석 없음*. 잘 명명된 식별자와 짧은 함수가 *코드가 곧 문서* 의 1차 수단이다.
+
+**추가 시 — 한 줄만**: 새 주석은 *어떤 코드인지* 또는 *왜* 의 핵심만 한 줄로 박는다. 두 줄을 넘기면 *코드 자체로 표현 가능한지* 다시 본다 (함수 추출 / 변수명 / enum 분기).
+
+**유지 대상** — *결정 근거 / contract / 비자명 invariant* 만:
+- D-N decision 박제 (`decision.md` 와 짝, 코드가 그 결정의 *코드 위치* 임을 명시할 때)
+- contract 명문화 (예: D-5 *결제 흐름 cache 결정 금지* — KDoc 한 단락이 *contract SSOT*)
+- race window / 동시성 / TX 경계 / 비자명한 SQL 분기 같은 *읽는 사람이 코드만 봐서는 못 잡는 invariant*
+
+**제거 대상** — 발견 시 *코드 수정 사이클에* 같이 정리 (한 번에 일괄 X):
+- WHAT 설명 (`// users 리스트를 순회한다` — 코드가 이미 그것)
+- 자명한 동작 / 외부 문서 중복 (`docs/presentation/week3.md` 의 내용을 KDoc 에 복붙)
+- 변경 history / "이전에는 X 였다" / "TODO 후 삭제" 회고성 — git log / PR 본문이 SSOT
+- 길게 늘어진 KDoc 중 *결정 / contract / invariant 외의 산문* — 축약 또는 제거
+
+**축약 절차**: 코드 수정 시 같은 파일 상단 KDoc 을 *읽고*, *유지 대상* 만 남기고 나머지 줄을 같은 commit 에 정리. 별도 *주석 정리 commit* 분리 금지 — 본 정책은 *점진적 정리* 가 본질.
+
 ## Plan 구조 (주차)
 
 주차 plan 은 두 짝 + decision log 의 세 문서로 구성한다 — 정형 예시 `docs/plan/week5-b.md` + `docs/plan/week5.md` + `docs/plan/week5/decision.md`. 작성 절차 / 매핑 규약 / SSOT 분담은 `create-plan` / `record-decision` SKILL.md 참조.
