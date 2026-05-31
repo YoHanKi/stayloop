@@ -1,0 +1,81 @@
+name: PR lint
+
+# PR 본문은 작성자 양심에만 맡기지 않는다. 제목 prefix·필수 섹션은 *기계적*으로 강제하고,
+# 분량은 막지 않되 과도하면 경고만 남긴다 (복잡한 PR 은 길 권리가 있다 — block 은 노이즈).
+#
+# 의도적 비목표: 본 게이트는 *형식*만 본다. "WHY 위주인가 / diff 재진술 아닌가" 같은 *의미*
+# 검증은 LLM 게이트가 필요하나 secret·운영 비용이 커 도입하지 않는다. 의미 품질은 create-pr
+# 스킬 + 사람 리뷰가 책임진다. 여기서는 의미를 *근사하는 싼 휴리스틱*(결정 개수)까지만 경고한다.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR title & body
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const title = (pr.title || "").trim();
+            const rawBody = pr.body || "";
+            const errors = [];
+            const warnings = [];
+
+            // 측정용 본문: HTML 주석 + <details> 블록(접힌 증거)은 분량/내용 판정에서 제외
+            const body = rawBody
+              .replace(/<!--[\s\S]*?-->/g, "")
+              .replace(/<details[\s\S]*?<\/details>/gi, "");
+
+            // 1) 제목: <prefix>(scope?): 요약  (prefix 어휘 = 커밋 컨벤션과 동일)
+            const titleRe = /^(feat|fix|refactor|migration|docs|chore|skills)(\([a-z0-9\-]+\))?:\s.+/;
+            if (!titleRe.test(title)) {
+              errors.push('제목이 `<prefix>: 요약` 형식이 아니다 (prefix = feat/fix/refactor/migration/docs/chore/skills, scope 선택).');
+            }
+            if (/[.]$/.test(title)) {
+              warnings.push('제목 끝의 마침표는 빼는 게 관용이다.');
+            }
+
+            // 섹션 본문 추출: `## 헤딩` 다음부터 다음 `## ` 전까지 (m 플래그 없이 — $ = 문서 끝)
+            const sectionBody = (re) => {
+              const m = body.match(new RegExp('(?:^|\\n)##\\s*' + re + '[^\\n]*\\n([\\s\\S]*?)(?=\\n##\\s|$)'));
+              return m ? m[1].replace(/[-\s]/g, '') : null; // bullet/공백 제거 후 알맹이만
+            };
+
+            // 2) 필수 섹션: TL;DR + 검증 — 존재 + 알맹이(내용) 있어야 통과
+            const tldr = sectionBody('TL;DR');
+            if (tldr === null)      errors.push('`## TL;DR` 섹션이 없다 — 목적+결과 한두 줄은 필수.');
+            else if (!tldr.length)  errors.push('`## TL;DR` 가 비어 있다 — 빈 깡통 섹션 금지.');
+
+            const verify = sectionBody('검증');
+            if (verify === null)      errors.push('`## 검증` 섹션이 없다 — 자동 검증 결과 / 리뷰어 재현법은 필수.');
+            else if (!verify.length)  errors.push('`## 검증` 이 비어 있다 — 빈 깡통 섹션 금지.');
+
+            // 3) 분량(증거 제외) — block 없이 경고만
+            const lines = body.split('\n').length;
+            if (lines > 200) {
+              warnings.push(`본문이 ${lines}줄로 길다 (증거 블록 제외) — PR 을 더 작게 쪼갤 수 있는지, raw 로그를 <details> 로 접거나 정제 수치만 남겼는지 확인.`);
+            }
+
+            // 4) 결정 개수 휴리스틱: `핵심 설계·결정` 섹션 *안의* ### 만 센다 (다른 섹션 ### 오탐 방지)
+            const designM = body.match(/(?:^|\n)##\s*핵심 설계[^\n]*\n([\s\S]*?)(?=\n##\s|$)/);
+            const decisions = designM ? (designM[1].match(/(?:^|\n)###\s/g) || []).length : 0;
+            if (decisions > 3) {
+              warnings.push(`핵심 결정이 ${decisions}개다 — 1~2개로 압축하고 나머지는 decision 문서로, 또는 PR 을 주제별로 분리할 신호.`);
+            }
+
+            const md = [];
+            if (errors.length)   md.push('### ❌ PR 형식 위반\n' + errors.map(e => `- ${e}`).join('\n'));
+            if (warnings.length) md.push('### ⚠️ 권고\n' + warnings.map(w => `- ${w}`).join('\n'));
+            if (md.length) {
+              md.push('\n형식 가이드: `.github/pull_request_template.md` / 작성법: `.claude/skills/create-pr/SKILL.md`');
+              core.notice(md.join('\n\n'));
+            }
+            if (errors.length) {
+              core.setFailed(errors.join(' / '));
+            }
