@@ -13,6 +13,8 @@ class PropertyRepositoryImpl(
 
     override fun findById(id: Long): PropertyModel? = propertyJpaRepository.findById(id).orElse(null)
 
+    override fun findAllByIds(ids: List<Long>): List<PropertyModel> = propertyJpaRepository.findAllById(ids).toList()
+
     override fun findByCity(city: String, page: Int, size: Int): List<PropertyModel> =
         propertyJpaRepository.findByCity(city, PageRequest.of(page, size))
 

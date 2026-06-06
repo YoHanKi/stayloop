@@ -22,6 +22,8 @@ class InMemoryPropertyRepository : PropertyRepository {
 
     override fun findById(id: Long): PropertyModel? = store[id]
 
+    override fun findAllByIds(ids: List<Long>): List<PropertyModel> = ids.mapNotNull { store[it] }
+
     override fun findByCity(city: String, page: Int, size: Int): List<PropertyModel> =
         store.values
             .filter { it.address.city == city }
