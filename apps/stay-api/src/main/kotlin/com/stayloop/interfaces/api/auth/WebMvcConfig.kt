@@ -7,8 +7,10 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer
 @Configuration
 class WebMvcConfig(
     private val loginCredentialsArgumentResolver: LoginCredentialsArgumentResolver,
+    private val loginUserArgumentResolver: LoginUserArgumentResolver,
 ) : WebMvcConfigurer {
     override fun addArgumentResolvers(resolvers: MutableList<HandlerMethodArgumentResolver>) {
         resolvers.add(loginCredentialsArgumentResolver)
+        resolvers.add(loginUserArgumentResolver)
     }
 }
