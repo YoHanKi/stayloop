@@ -88,7 +88,9 @@ class ReservationFacade(
     fun cancel(loginId: LoginId, reservationId: Long): ReservationInfo =
         retryOnTransientLock {
             txTemplate.execute {
-                val reservation = reservationRepository.findById(reservationId)
+                // FOR UPDATE 로 예약 row 를 잠가, 동시 취소가 같은 예약을 두 번 복원하지 못하게 한다.
+                // 둘째 트랜잭션은 락 해제 후 CANCELLED 를 신선하게 읽어 상태 전이에서 CONFLICT 로 걸린다.
+                val reservation = reservationRepository.findByIdForUpdate(reservationId)
                     ?: throw CoreException(ErrorType.NOT_FOUND, "존재하지 않는 예약입니다.")
                 requireOwner(reservation, loginId)
 

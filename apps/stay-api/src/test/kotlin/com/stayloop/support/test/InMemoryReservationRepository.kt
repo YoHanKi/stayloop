@@ -22,6 +22,9 @@ class InMemoryReservationRepository : ReservationRepository {
 
     override fun findById(id: Long): ReservationModel? = store[id]
 
+    // POJO 더블은 단일 스레드라 락이 불필요 — 운영의 FOR UPDATE 와 관측 동치(같은 행 반환).
+    override fun findByIdForUpdate(id: Long): ReservationModel? = store[id]
+
     override fun findByUserId(loginId: LoginId, page: Int, size: Int): List<ReservationModel> =
         store.values
             .filter { it.userId == loginId }

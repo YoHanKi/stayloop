@@ -5,6 +5,7 @@ import com.stayloop.domain.reservation.QReservationModel
 import com.stayloop.domain.reservation.ReservationModel
 import com.stayloop.domain.reservation.ReservationRepository
 import com.stayloop.domain.user.value.LoginId
+import jakarta.persistence.LockModeType
 import org.springframework.stereotype.Component
 
 @Component
@@ -17,6 +18,13 @@ class ReservationRepositoryImpl(
     override fun save(reservation: ReservationModel): ReservationModel = reservationJpaRepository.save(reservation)
 
     override fun findById(id: Long): ReservationModel? = reservationJpaRepository.findById(id).orElse(null)
+
+    override fun findByIdForUpdate(id: Long): ReservationModel? =
+        queryFactory
+            .selectFrom(reservation)
+            .where(reservation.id.eq(id))
+            .setLockMode(LockModeType.PESSIMISTIC_WRITE)
+            .fetchOne()
 
     override fun findByUserId(loginId: LoginId, page: Int, size: Int): List<ReservationModel> =
         queryFactory

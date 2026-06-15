@@ -86,6 +86,21 @@ class ConcurrentReservationTest
             assertThat(issuedCouponJpaRepository.findById(couponId).orElseThrow().status).isEqualTo(CouponStatus.USED)
         }
 
+        @DisplayName("같은 예약을 동시에 여러 번 취소해도 재고는 한 번만 복원된다(과복원 없음).")
+        @Test
+        fun duplicateCancel_restoresOnce() {
+            val roomTypeId = seedRoomTypeWithStock(total = 5)
+            val propertyId = propertyIdOf(roomTypeId)
+            val idA = reservationFacade.reserve(command(roomTypeId, couponId = null)).reservationId
+            reservationFacade.reserve(reserveAs(LoginId("bob002"), propertyId, roomTypeId)) // 같은 날짜 다른 예약 → reserved=2
+            assertThat(inventory(roomTypeId).reservedRooms).isEqualTo(2)
+
+            val success = runConcurrent(20) { attempt { reservationFacade.cancel(alice, idA) } }
+
+            assertThat(success).isEqualTo(1)
+            assertThat(inventory(roomTypeId).reservedRooms).isEqualTo(1) // bob 의 1실만 남음(과복원 없음)
+        }
+
         @DisplayName("이미 사용한 쿠폰으로 예약하면 CONFLICT 이고 재고 차감·예약 생성이 전체 롤백된다.")
         @Test
         fun usedCouponReservation_rollsBackEverything() {
@@ -141,6 +156,19 @@ class ConcurrentReservationTest
                 guestName = "홍길동",
                 guestPhoneNumber = "010-1234-5678",
                 issuedCouponId = couponId,
+            )
+
+        private fun reserveAs(who: LoginId, propertyId: Long, roomTypeId: Long) =
+            ReserveCommand(
+                loginId = who,
+                propertyId = propertyId,
+                roomTypeId = roomTypeId,
+                checkIn = checkIn,
+                checkOut = checkOut,
+                guestCount = 2,
+                guestName = "김철수",
+                guestPhoneNumber = "010-9999-8888",
+                issuedCouponId = null,
             )
 
         private fun propertyIdOf(roomTypeId: Long): Long =
