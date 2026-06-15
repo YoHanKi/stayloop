@@ -17,6 +17,7 @@ import jakarta.persistence.Entity
 import jakarta.persistence.EnumType
 import jakarta.persistence.Enumerated
 import jakarta.persistence.Table
+import jakarta.persistence.UniqueConstraint
 import java.time.LocalDateTime
 
 /**
@@ -26,7 +27,10 @@ import java.time.LocalDateTime
  * 상태 변경 메서드는 모두 [ReservationStatus.canTransitTo] 를 거쳐 합법 전이만 통과시킨다.
  */
 @Entity
-@Table(name = "reservations")
+@Table(
+    name = "reservations",
+    uniqueConstraints = [UniqueConstraint(name = "uk_reservations_idempotency_key", columnNames = ["idempotency_key"])],
+)
 class ReservationModel internal constructor(
     userId: LoginId,
     property: PropertySnapshot,
@@ -38,6 +42,7 @@ class ReservationModel internal constructor(
     discountAmount: Money,
     totalPrice: Money,
     couponId: Long?,
+    idempotencyKey: String?,
 ) : BaseEntity() {
 
     @Embedded
@@ -90,6 +95,11 @@ class ReservationModel internal constructor(
     var couponId: Long? = couponId
         protected set
 
+    /** 요청 단위 멱등 키(선택). 같은 키의 중복 예약 생성을 UNIQUE 로 막고, 충돌 시 최초 예약을 재응답한다(04 review P1-1). */
+    @Column(name = "idempotency_key", length = 80)
+    var idempotencyKey: String? = idempotencyKey
+        protected set
+
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false, length = 20)
     var status: ReservationStatus = ReservationStatus.PENDING
@@ -134,6 +144,7 @@ class ReservationModel internal constructor(
             discountAmount: Money,
             totalPrice: Money,
             couponId: Long?,
+            idempotencyKey: String? = null,
         ): ReservationModel =
             ReservationModel(
                 userId = userId,
@@ -146,6 +157,7 @@ class ReservationModel internal constructor(
                 discountAmount = discountAmount,
                 totalPrice = totalPrice,
                 couponId = couponId,
+                idempotencyKey = idempotencyKey,
             )
     }
 }

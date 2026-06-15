@@ -17,7 +17,7 @@ class ReservationV1Dto {
         val guestPhoneNumber: String,
         val issuedCouponId: Long? = null,
     ) {
-        fun toCommand(loginId: LoginId): ReserveCommand =
+        fun toCommand(loginId: LoginId, idempotencyKey: String? = null): ReserveCommand =
             ReserveCommand(
                 loginId = loginId,
                 propertyId = propertyId,
@@ -28,6 +28,7 @@ class ReservationV1Dto {
                 guestName = guestName,
                 guestPhoneNumber = guestPhoneNumber,
                 issuedCouponId = issuedCouponId,
+                idempotencyKey = idempotencyKey,
             )
     }
 

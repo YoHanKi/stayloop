@@ -5,6 +5,7 @@ import com.stayloop.application.coupon.command.IssueCouponCommand
 import com.stayloop.domain.coupon.CouponService
 import com.stayloop.domain.coupon.value.DiscountType
 import com.stayloop.domain.user.value.LoginId
+import com.stayloop.support.concurrency.HotKeyGuard
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
 import com.stayloop.support.test.InMemoryCouponTemplateRepository
@@ -27,7 +28,12 @@ class CouponFacadeTest {
     fun setUp() {
         templateRepository = InMemoryCouponTemplateRepository()
         issuedRepository = InMemoryIssuedCouponRepository()
-        sut = CouponFacade(templateRepository, issuedRepository, CouponService(templateRepository, issuedRepository))
+        sut = CouponFacade(
+            templateRepository,
+            issuedRepository,
+            CouponService(templateRepository, issuedRepository),
+            HotKeyGuard(maxConcurrentPerKey = 64),
+        )
     }
 
     private fun create(total: Int = 10): Long =

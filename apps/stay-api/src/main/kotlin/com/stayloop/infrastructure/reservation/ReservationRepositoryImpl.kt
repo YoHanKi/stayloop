@@ -26,6 +26,12 @@ class ReservationRepositoryImpl(
             .setLockMode(LockModeType.PESSIMISTIC_WRITE)
             .fetchOne()
 
+    override fun findByIdempotencyKey(idempotencyKey: String): ReservationModel? =
+        queryFactory
+            .selectFrom(reservation)
+            .where(reservation.idempotencyKey.eq(idempotencyKey))
+            .fetchOne()
+
     override fun findByUserId(loginId: LoginId, page: Int, size: Int): List<ReservationModel> =
         queryFactory
             .selectFrom(reservation)

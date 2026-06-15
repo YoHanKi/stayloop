@@ -34,6 +34,7 @@ class ReservationServiceTest {
         rates = rates,
         discount = discount,
         couponId = couponId,
+        idempotencyKey = null,
     )
 
     @DisplayName("정상 예약은 PENDING 으로 생성되고 할인 없으면 할인 전·최종 금액이 합산 요금과 같다.")

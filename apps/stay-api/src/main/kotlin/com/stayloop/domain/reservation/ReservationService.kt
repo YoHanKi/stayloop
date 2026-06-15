@@ -42,6 +42,7 @@ class ReservationService(
         rates: List<DailyRoomRateModel>,
         discount: DiscountValue?,
         couponId: Long?,
+        idempotencyKey: String?,
     ): ReservationModel {
         roomType.checkGuestCount(guestCount)
 
@@ -62,6 +63,7 @@ class ReservationService(
             discountAmount = discountAmount,
             totalPrice = totalPrice,
             couponId = couponId,
+            idempotencyKey = idempotencyKey,
         )
     }
 

@@ -23,6 +23,7 @@ import com.stayloop.domain.reservation.ReservationPriceCalculator
 import com.stayloop.domain.reservation.ReservationService
 import com.stayloop.domain.reservation.value.ReservationStatus
 import com.stayloop.domain.user.value.LoginId
+import com.stayloop.support.concurrency.HotKeyGuard
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
 import com.stayloop.support.test.InMemoryCouponTemplateRepository
@@ -81,6 +82,7 @@ class ReservationFacadeTest {
             issuedCouponRepository,
             ReservationService(ReservationPriceCalculator()),
             reservationRepository,
+            HotKeyGuard(maxConcurrentPerKey = 64),
             clock,
             NoOpTransactionManager(),
         )
@@ -291,6 +293,18 @@ class ReservationFacadeTest {
         assertThatThrownBy { sut.reserve(command().copy(issuedCouponId = couponId)) }
             .isInstanceOf(CoreException::class.java)
             .extracting("errorType").isEqualTo(ErrorType.FORBIDDEN)
+    }
+
+    @DisplayName("같은 멱등 키로 두 번 예약하면 최초 예약을 그대로 재응답하고 재고는 한 번만 차감된다(P1-1).")
+    @Test
+    fun shouldReplayOnSameIdempotencyKey() {
+        seedFullInventoryAndRate()
+
+        val first = sut.reserve(command().copy(idempotencyKey = "idem-1"))
+        val second = sut.reserve(command().copy(idempotencyKey = "idem-1"))
+
+        assertThat(second.reservationId).isEqualTo(first.reservationId)
+        assertThat(inventoryRepository.findById(roomTypeId, checkIn)!!.reservedRooms).isEqualTo(1)
     }
 
     private fun issueCoupon(

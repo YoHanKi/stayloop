@@ -14,6 +14,9 @@ interface ReservationRepository {
      */
     fun findByIdForUpdate(id: Long): ReservationModel?
 
+    /** 멱등 키로 기존 예약을 찾는다(중복 요청 재응답용). 없으면 null. */
+    fun findByIdempotencyKey(idempotencyKey: String): ReservationModel?
+
     /** 사용자의 예약 목록을 체크인 내림차순(같으면 id 내림차순)으로 페이지 조회한다. */
     fun findByUserId(loginId: LoginId, page: Int, size: Int): List<ReservationModel>
 }

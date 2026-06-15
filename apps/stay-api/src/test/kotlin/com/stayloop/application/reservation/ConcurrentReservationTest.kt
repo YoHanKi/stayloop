@@ -116,6 +116,24 @@ class ConcurrentReservationTest
             assertThat(reservationRepository.findByUserId(alice, 0, 20)).hasSize(1)
         }
 
+        @DisplayName("같은 멱등 키로 동시에 예약해도 한 건만 생성되고 모두 같은 예약을 받는다(P1-1).")
+        @Test
+        fun sameIdempotencyKey_createsOnce() {
+            val roomTypeId = seedRoomTypeWithStock(total = 5)
+            val key = "idem-concurrent-1"
+            val ids = java.util.concurrent.ConcurrentLinkedQueue<Long>()
+
+            runConcurrent(4) {
+                attempt { ids.add(reservationFacade.reserve(commandWithKey(roomTypeId, key)).reservationId) }
+            }
+
+            assertThat(inventory(roomTypeId).reservedRooms).isEqualTo(1)
+            assertThat(ids.toSet()).hasSize(1)
+        }
+
+        private fun commandWithKey(roomTypeId: Long, key: String) =
+            command(roomTypeId, couponId = null).copy(idempotencyKey = key)
+
         private fun seedRoomTypeWithStock(total: Int): Long {
             val property = propertyRepository.save(
                 PropertyModel.create(

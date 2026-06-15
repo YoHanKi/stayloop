@@ -8,6 +8,7 @@ import com.stayloop.domain.coupon.CouponTemplateRepository
 import com.stayloop.domain.coupon.IssuedCouponRepository
 import com.stayloop.domain.coupon.value.DiscountValue
 import com.stayloop.domain.user.value.LoginId
+import com.stayloop.support.concurrency.HotKeyGuard
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
 import org.springframework.dao.DataIntegrityViolationException
@@ -24,6 +25,7 @@ class CouponFacade(
     private val couponTemplateRepository: CouponTemplateRepository,
     private val issuedCouponRepository: IssuedCouponRepository,
     private val couponService: CouponService,
+    private val hotKeyGuard: HotKeyGuard,
 ) {
     @Transactional
     fun createTemplate(command: CreateCouponTemplateCommand): CouponTemplateInfo {
@@ -39,11 +41,14 @@ class CouponFacade(
 
     @Transactional
     fun issue(command: IssueCouponCommand): IssuedCouponInfo =
-        try {
-            IssuedCouponInfo.from(couponService.issue(command.templateId, command.loginId))
-        } catch (e: DataIntegrityViolationException) {
-            // (template, user) UNIQUE 위반 — 동일인 중복 발급. 증가시킨 발급 수는 트랜잭션 롤백으로 되돌아간다.
-            throw CoreException(ErrorType.CONFLICT, "이미 발급받은 쿠폰입니다.")
+        // 선착순 발급 핫키 admission control — 한 캠페인의 동시 발급이 한도를 넘으면 429 로 빠른 실패(04 review P1-4).
+        hotKeyGuard.withPermit("coupon:tpl:${command.templateId}") {
+            try {
+                IssuedCouponInfo.from(couponService.issue(command.templateId, command.loginId))
+            } catch (e: DataIntegrityViolationException) {
+                // (template, user) UNIQUE 위반 — 동일인 중복 발급. 증가시킨 발급 수는 트랜잭션 롤백으로 되돌아간다.
+                throw CoreException(ErrorType.CONFLICT, "이미 발급받은 쿠폰입니다.")
+            }
         }
 
     @Transactional(readOnly = true)
