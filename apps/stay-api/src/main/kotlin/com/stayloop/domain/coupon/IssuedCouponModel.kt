@@ -70,4 +70,12 @@ class IssuedCouponModel(
         status = CouponStatus.USED
         usedAt = now
     }
+
+    /** USED → AVAILABLE 복원(예약 취소 시). 이미 AVAILABLE 이면 멱등하게 무시한다. */
+    fun revertUse() {
+        if (status == CouponStatus.USED) {
+            status = CouponStatus.AVAILABLE
+            usedAt = null
+        }
+    }
 }

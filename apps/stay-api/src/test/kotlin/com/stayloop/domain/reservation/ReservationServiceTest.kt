@@ -22,6 +22,8 @@ class ReservationServiceTest {
         guestCount: Int = 2,
         rates: List<com.stayloop.domain.rate.DailyRoomRateModel> =
             listOf(ReservationFixture.rate(day1, 100_000), ReservationFixture.rate(day2, 120_000)),
+        discount: com.stayloop.domain.coupon.value.DiscountValue? = null,
+        couponId: Long? = null,
     ) = service.reserve(
         userId = ReservationFixture.USER,
         property = ReservationFixture.property(),
@@ -30,15 +32,37 @@ class ReservationServiceTest {
         guestCount = guestCount,
         guest = ReservationFixture.GUEST,
         rates = rates,
+        discount = discount,
+        couponId = couponId,
     )
 
-    @DisplayName("정상 예약은 PENDING 으로 생성되고 합산 요금이 매겨진다(재고 차감은 reserver 의 몫).")
+    @DisplayName("정상 예약은 PENDING 으로 생성되고 할인 없으면 할인 전·최종 금액이 합산 요금과 같다.")
     @Test
     fun shouldReserveNormally() {
         val reservation = reserve()
 
         assertThat(reservation.status).isEqualTo(ReservationStatus.PENDING)
+        assertThat(reservation.priceBeforeDiscount).isEqualTo(Money.of(220_000))
+        assertThat(reservation.discountAmount).isEqualTo(Money.ZERO)
         assertThat(reservation.totalPrice).isEqualTo(Money.of(220_000))
+        assertThat(reservation.couponId).isNull()
+    }
+
+    @DisplayName("쿠폰 할인이 있으면 할인액을 빼 최종 금액을 매기고 금액 3종·쿠폰 식별자를 스냅샷한다.")
+    @Test
+    fun shouldApplyCouponDiscount() {
+        val reservation = reserve(
+            discount = com.stayloop.domain.coupon.value.DiscountValue.of(
+                com.stayloop.domain.coupon.value.DiscountType.FIXED,
+                20_000,
+            ),
+            couponId = 7L,
+        )
+
+        assertThat(reservation.priceBeforeDiscount).isEqualTo(Money.of(220_000))
+        assertThat(reservation.discountAmount).isEqualTo(Money.of(20_000))
+        assertThat(reservation.totalPrice).isEqualTo(Money.of(200_000))
+        assertThat(reservation.couponId).isEqualTo(7L)
     }
 
     @DisplayName("요청 인원이 객실 최대 인원을 넘으면 BAD_REQUEST 로 거절된다.")

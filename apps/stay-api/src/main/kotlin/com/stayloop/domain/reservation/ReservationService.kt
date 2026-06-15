@@ -1,5 +1,7 @@
 package com.stayloop.domain.reservation
 
+import com.stayloop.domain.common.value.Money
+import com.stayloop.domain.coupon.value.DiscountValue
 import com.stayloop.domain.rate.DailyRoomRateModel
 import com.stayloop.domain.reservation.value.GuestInfo
 import com.stayloop.domain.reservation.value.PropertySnapshot
@@ -24,9 +26,11 @@ class ReservationService(
     private val priceCalculator: ReservationPriceCalculator,
 ) {
     /**
-     * 인원·요금 일자 정합을 검증하고 합산 요금을 매겨 PENDING 예약을 만든다(재고 차감은 하지 않는다 —
-     * 호출자가 [com.stayloop.domain.inventory.RoomInventoryReserver] 로 임계 구간에서 차감한다).
-     * 락 밖에서 도는 단계라 견적·검증이 임계 구간을 늘리지 않는다(04-b §4).
+     * 인원·요금 일자 정합을 검증하고 할인 전 합산 요금·할인액·최종액을 스냅샷해 PENDING 예약을 만든다.
+     * 재고 차감·쿠폰 사용은 하지 않는다(호출자가 임계 구간에서 수행). 금액 스냅샷은 생성 시점에 고정돼
+     * 이후 요금·쿠폰 정책 변경의 영향을 받지 않는다(04-b §2).
+     *
+     * @param discount 적용할 쿠폰 할인(없으면 null → 할인 0). @param couponId 사용한 발급 쿠폰 식별자(없으면 null).
      */
     fun reserve(
         userId: LoginId,
@@ -36,12 +40,16 @@ class ReservationService(
         guestCount: Int,
         guest: GuestInfo,
         rates: List<DailyRoomRateModel>,
+        discount: DiscountValue?,
+        couponId: Long?,
     ): ReservationModel {
         roomType.checkGuestCount(guestCount)
 
         val dates = period.datesToReserve()
         val orderedRates = alignToDates(rates, dates, roomType.roomTypeId) { it.roomTypeId to it.date }
-        val totalPrice = priceCalculator.totalPrice(orderedRates)
+        val priceBeforeDiscount = priceCalculator.totalPrice(orderedRates)
+        val discountAmount = discount?.discount(priceBeforeDiscount) ?: Money.ZERO
+        val totalPrice = priceBeforeDiscount - discountAmount
 
         return ReservationModel.create(
             userId = userId,
@@ -50,7 +58,10 @@ class ReservationService(
             period = period,
             guestCount = guestCount,
             guest = guest,
+            priceBeforeDiscount = priceBeforeDiscount,
+            discountAmount = discountAmount,
             totalPrice = totalPrice,
+            couponId = couponId,
         )
     }
 

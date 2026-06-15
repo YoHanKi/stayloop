@@ -24,6 +24,9 @@ class Money private constructor(
 
     operator fun plus(other: Money): Money = Money(amount + other.amount)
 
+    /** 차감. 결과가 음수면 [of] 가 거절한다(예: 할인이 원금 초과). */
+    operator fun minus(other: Money): Money = of(amount - other.amount)
+
     /** 할인율·세율 등 소수 곱셈 자리. 결과는 [SCALE] 로 반올림한다(쿠폰·세금은 6주차, 03 §7). */
     operator fun times(multiplier: BigDecimal): Money =
         Money(amount.multiply(multiplier).setScale(SCALE, RoundingMode.HALF_UP))

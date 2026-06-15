@@ -40,4 +40,16 @@ class IssuedCouponRepositoryImpl(
             )
             .execute()
             .toInt()
+
+    override fun markAvailableIfUsed(issuedCouponId: Long): Int =
+        queryFactory
+            .update(issued)
+            .set(issued.status, CouponStatus.AVAILABLE)
+            .setNull(issued.usedAt)
+            .where(
+                issued.id.eq(issuedCouponId),
+                issued.status.eq(CouponStatus.USED),
+            )
+            .execute()
+            .toInt()
 }

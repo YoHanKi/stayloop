@@ -34,7 +34,10 @@ class ReservationModel internal constructor(
     period: StayPeriod,
     guestCount: Int,
     guest: GuestInfo,
+    priceBeforeDiscount: Money,
+    discountAmount: Money,
     totalPrice: Money,
+    couponId: Long?,
 ) : BaseEntity() {
 
     @Embedded
@@ -63,8 +66,28 @@ class ReservationModel internal constructor(
         protected set
 
     @Embedded
+    @AttributeOverride(
+        name = "amount",
+        column = Column(name = "price_before_discount", nullable = false, precision = 19, scale = 2),
+    )
+    var priceBeforeDiscount: Money = priceBeforeDiscount
+        protected set
+
+    @Embedded
+    @AttributeOverride(
+        name = "amount",
+        column = Column(name = "discount_amount", nullable = false, precision = 19, scale = 2),
+    )
+    var discountAmount: Money = discountAmount
+        protected set
+
+    @Embedded
     @AttributeOverride(name = "amount", column = Column(name = "total_price", nullable = false, precision = 19, scale = 2))
     var totalPrice: Money = totalPrice
+        protected set
+
+    @Column(name = "coupon_id")
+    var couponId: Long? = couponId
         protected set
 
     @Enumerated(EnumType.STRING)
@@ -107,7 +130,10 @@ class ReservationModel internal constructor(
             period: StayPeriod,
             guestCount: Int,
             guest: GuestInfo,
+            priceBeforeDiscount: Money,
+            discountAmount: Money,
             totalPrice: Money,
+            couponId: Long?,
         ): ReservationModel =
             ReservationModel(
                 userId = userId,
@@ -116,7 +142,10 @@ class ReservationModel internal constructor(
                 period = period,
                 guestCount = guestCount,
                 guest = guest,
+                priceBeforeDiscount = priceBeforeDiscount,
+                discountAmount = discountAmount,
                 totalPrice = totalPrice,
+                couponId = couponId,
             )
     }
 }

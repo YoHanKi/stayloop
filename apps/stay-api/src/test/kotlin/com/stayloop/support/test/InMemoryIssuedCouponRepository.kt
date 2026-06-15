@@ -47,6 +47,13 @@ class InMemoryIssuedCouponRepository : IssuedCouponRepository {
         return 1
     }
 
+    override fun markAvailableIfUsed(issuedCouponId: Long): Int {
+        val issued = store[issuedCouponId] ?: return 0
+        if (issued.status != CouponStatus.USED) return 0
+        issued.revertUse()
+        return 1
+    }
+
     private fun assignId(entity: BaseEntity, id: Long) {
         val field = BaseEntity::class.java.getDeclaredField("id")
         field.isAccessible = true

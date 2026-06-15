@@ -16,4 +16,7 @@ interface IssuedCouponRepository {
      * 0 행 = 이미 사용 같은 해석은 호출하는 도메인 서비스가 한다(영속성은 사실만 반환).
      */
     fun markUsedIfAvailable(issuedCouponId: Long, usedAt: LocalDateTime): Int
+
+    /** `status = USED` 인 경우에만 AVAILABLE 로 복원하고 갱신된 행 수를 돌려준다(예약 취소 시, 멱등). */
+    fun markAvailableIfUsed(issuedCouponId: Long): Int
 }

@@ -15,6 +15,7 @@ data class ReserveCommand(
     val guestCount: Int,
     val guestName: String,
     val guestPhoneNumber: String,
+    val issuedCouponId: Long? = null,
 ) {
     fun period(): StayPeriod = StayPeriod(checkIn, checkOut)
 

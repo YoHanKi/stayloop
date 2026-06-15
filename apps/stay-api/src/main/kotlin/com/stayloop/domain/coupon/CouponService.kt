@@ -40,4 +40,9 @@ class CouponService(
             throw CoreException(ErrorType.CONFLICT, "이미 사용했거나 사용할 수 없는 쿠폰입니다.")
         }
     }
+
+    /** 예약 취소 시 쿠폰 복원(USED → AVAILABLE). 이미 AVAILABLE 이거나 없어도 멱등하게 무시한다(복원은 best-effort). */
+    fun restore(issuedCouponId: Long) {
+        issuedCouponRepository.markAvailableIfUsed(issuedCouponId)
+    }
 }
