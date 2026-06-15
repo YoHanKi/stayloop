@@ -3,6 +3,7 @@ package com.stayloop.application.reservation
 import com.stayloop.application.reservation.command.ReserveCommand
 import com.stayloop.domain.common.value.Money
 import com.stayloop.domain.inventory.DailyRoomInventoryModel
+import com.stayloop.domain.inventory.DailyRoomInventoryService
 import com.stayloop.domain.property.PropertyModel
 import com.stayloop.domain.property.RoomTypeModel
 import com.stayloop.domain.property.value.Address
@@ -60,8 +61,8 @@ class ReservationFacadeTest {
         sut = ReservationFacade(
             propertyRepository,
             roomTypeRepository,
-            inventoryRepository,
             rateRepository,
+            DailyRoomInventoryService(inventoryRepository),
             ReservationService(ReservationPriceCalculator()),
             reservationRepository,
             clock,
@@ -125,7 +126,7 @@ class ReservationFacadeTest {
         assertThat(inventoryRepository.findById(roomTypeId, checkIn.plusDays(1))!!.reservedRooms).isEqualTo(1)
     }
 
-    @DisplayName("재고 정보가 일자와 1:1 로 맞지 않으면 BAD_REQUEST 로 거절되고 어떤 재고도 차감되지 않는다(AC-4 가드).")
+    @DisplayName("어느 한 일자의 재고 정보가 없으면 CONFLICT 로 거절되고 어떤 재고도 차감되지 않는다(부분 차감 금지).")
     @Test
     fun shouldRejectAndNotPartiallyDecrementOnMissingInventory() {
         inventoryRepository.save(DailyRoomInventoryModel(roomTypeId, checkIn, totalRooms = 2))
@@ -138,7 +139,29 @@ class ReservationFacadeTest {
 
         assertThatThrownBy { sut.reserve(command()) }
             .isInstanceOf(CoreException::class.java)
-            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+            .extracting("errorType").isEqualTo(ErrorType.CONFLICT)
+        assertThat(inventoryRepository.findById(roomTypeId, checkIn)!!.reservedRooms).isEqualTo(0)
+    }
+
+    @DisplayName("어느 한 일자라도 매진이면 CONFLICT 로 거절되고 어떤 재고도 차감되지 않는다(부분 차감 금지).")
+    @Test
+    fun shouldRejectAndNotPartiallyDecrementOnSoldOut() {
+        inventoryRepository.saveAll(
+            listOf(
+                DailyRoomInventoryModel(roomTypeId, checkIn, totalRooms = 2),
+                DailyRoomInventoryModel(roomTypeId, checkIn.plusDays(1), totalRooms = 1, reservedRooms = 1),
+            ),
+        )
+        rateRepository.saveAll(
+            listOf(
+                DailyRoomRateModel(roomTypeId, checkIn, Money.of(100_000)),
+                DailyRoomRateModel(roomTypeId, checkIn.plusDays(1), Money.of(120_000)),
+            ),
+        )
+
+        assertThatThrownBy { sut.reserve(command()) }
+            .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.CONFLICT)
         assertThat(inventoryRepository.findById(roomTypeId, checkIn)!!.reservedRooms).isEqualTo(0)
     }
 

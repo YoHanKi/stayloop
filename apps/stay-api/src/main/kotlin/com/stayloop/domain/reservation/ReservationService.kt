@@ -1,6 +1,5 @@
 package com.stayloop.domain.reservation
 
-import com.stayloop.domain.inventory.DailyRoomInventoryModel
 import com.stayloop.domain.rate.DailyRoomRateModel
 import com.stayloop.domain.reservation.value.GuestInfo
 import com.stayloop.domain.reservation.value.PropertySnapshot
@@ -14,16 +13,20 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 
 /**
- * 예약 도메인 서비스. Repository 의존도 `@Transactional` 도 없다(03 §4) — 재고·요금은 호출자(Facade)가
+ * 예약 도메인 서비스. Repository 의존도 `@Transactional` 도 없다(03 §4) — 요금은 호출자(Facade)가
  * 미리 조회해 인자로 주입하고, 본 서비스는 받은 컬렉션으로 규칙만 수행한다. 트랜잭션 경계는 Facade.
+ *
+ * 재고 차감/복원은 동시성 제어(락·조건부 UPDATE)가 필요한 영속성 관심사라 [com.stayloop.domain.inventory.RoomInventoryReserver]
+ * 가 임계 구간에서 담당한다(04-b §5-1). 본 서비스는 락 밖에서 도는 인원·요금 규칙과 예약 생성만 맡는다.
  */
 @Service
 class ReservationService(
     private val priceCalculator: ReservationPriceCalculator,
 ) {
     /**
-     * 인원·일자·재고를 검증하고 날짜별 재고를 1 씩 차감한 뒤 PENDING 예약을 만든다.
-     * 인자로 받은 [inventories] 의 엔티티는 차감되어 호출자가 그대로 영속화한다.
+     * 인원·요금 일자 정합을 검증하고 합산 요금을 매겨 PENDING 예약을 만든다(재고 차감은 하지 않는다 —
+     * 호출자가 [com.stayloop.domain.inventory.RoomInventoryReserver] 로 임계 구간에서 차감한다).
+     * 락 밖에서 도는 단계라 견적·검증이 임계 구간을 늘리지 않는다(04-b §4).
      */
     fun reserve(
         userId: LoginId,
@@ -32,16 +35,12 @@ class ReservationService(
         period: StayPeriod,
         guestCount: Int,
         guest: GuestInfo,
-        inventories: List<DailyRoomInventoryModel>,
         rates: List<DailyRoomRateModel>,
     ): ReservationModel {
         roomType.checkGuestCount(guestCount)
 
         val dates = period.datesToReserve()
-        val orderedInventories = alignToDates(inventories, dates, roomType.roomTypeId) { it.roomTypeId to it.date }
         val orderedRates = alignToDates(rates, dates, roomType.roomTypeId) { it.roomTypeId to it.date }
-
-        orderedInventories.forEach { it.reserveOne() }
         val totalPrice = priceCalculator.totalPrice(orderedRates)
 
         return ReservationModel.create(
@@ -56,19 +55,11 @@ class ReservationService(
     }
 
     /**
-     * 예약을 취소(CANCELLED 전이)하고, 차감했던 날짜별 재고를 복원한다.
-     * 합법 전이가 아니면(예: CHECKED_IN 이후) [ReservationModel.cancel] 이 CONFLICT 로 막는다.
+     * 예약을 CANCELLED 로 전이한다(재고 복원은 호출자가 [com.stayloop.domain.inventory.RoomInventoryReserver]
+     * 로 수행). 합법 전이가 아니면(예: CHECKED_IN 이후) [ReservationModel.cancel] 이 CONFLICT 로 막는다.
      */
-    fun cancel(
-        reservation: ReservationModel,
-        inventories: List<DailyRoomInventoryModel>,
-        now: LocalDateTime,
-    ) {
+    fun cancel(reservation: ReservationModel, now: LocalDateTime) {
         reservation.cancel(now)
-        val byDate = inventories.associateBy { it.date }
-        reservation.period.datesToReserve().forEach { date ->
-            byDate[date]?.releaseOne()
-        }
     }
 
     /**
