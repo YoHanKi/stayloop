@@ -33,4 +33,27 @@ class PropertyRepositoryImpl(
             .from(property)
             .where(property.address.city.eq(city))
             .fetchOne() ?: 0L
+
+    override fun incrementWishCount(propertyId: Long): Int =
+        queryFactory
+            .update(property)
+            .set(property.wishCount, property.wishCount.add(1))
+            .where(property.id.eq(propertyId))
+            .execute()
+            .toInt()
+
+    override fun decrementWishCount(propertyId: Long): Int =
+        queryFactory
+            .update(property)
+            .set(property.wishCount, property.wishCount.subtract(1))
+            .where(property.id.eq(propertyId), property.wishCount.gt(0))
+            .execute()
+            .toInt()
+
+    override fun findWishCount(propertyId: Long): Int? =
+        queryFactory
+            .select(property.wishCount)
+            .from(property)
+            .where(property.id.eq(propertyId))
+            .fetchOne()
 }

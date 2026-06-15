@@ -18,22 +18,18 @@ class InMemoryWishlistRepository(
 ) : WishlistRepository {
     private val store = LinkedHashMap<WishlistId, WishlistModel>()
 
-    override fun existsBy(loginId: LoginId, propertyId: Long): Boolean {
-        val userId = resolveUserIdOrNull(loginId) ?: return false
-        return store.containsKey(WishlistId(userId, propertyId))
-    }
-
-    override fun save(loginId: LoginId, propertyId: Long, wishedAt: LocalDateTime): WishlistModel {
+    override fun add(loginId: LoginId, propertyId: Long, wishedAt: LocalDateTime): Boolean {
         val userId = resolveUserIdOrNull(loginId)
             ?: throw CoreException(ErrorType.NOT_FOUND, "존재하지 않는 사용자입니다.")
-        val model = WishlistModel(userId, propertyId, wishedAt)
-        store[WishlistId(userId, propertyId)] = model
-        return model
+        val key = WishlistId(userId, propertyId)
+        if (store.containsKey(key)) return false
+        store[key] = WishlistModel(userId, propertyId, wishedAt)
+        return true
     }
 
-    override fun deleteBy(loginId: LoginId, propertyId: Long) {
-        val userId = resolveUserIdOrNull(loginId) ?: return
-        store.remove(WishlistId(userId, propertyId))
+    override fun remove(loginId: LoginId, propertyId: Long): Boolean {
+        val userId = resolveUserIdOrNull(loginId) ?: return false
+        return store.remove(WishlistId(userId, propertyId)) != null
     }
 
     override fun findByUserId(loginId: LoginId, page: Int, size: Int): List<WishlistModel> {
