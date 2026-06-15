@@ -1,13 +1,14 @@
 package com.stayloop.infrastructure.wishlist
 
+import com.querydsl.jpa.impl.JPAQueryFactory
 import com.stayloop.domain.user.UserRepository
 import com.stayloop.domain.user.value.LoginId
+import com.stayloop.domain.wishlist.QWishlistModel
 import com.stayloop.domain.wishlist.WishlistId
 import com.stayloop.domain.wishlist.WishlistModel
 import com.stayloop.domain.wishlist.WishlistRepository
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
-import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Component
 import java.time.LocalDateTime
 
@@ -19,7 +20,9 @@ import java.time.LocalDateTime
 class WishlistRepositoryImpl(
     private val userRepository: UserRepository,
     private val wishlistJpaRepository: WishlistJpaRepository,
+    private val queryFactory: JPAQueryFactory,
 ) : WishlistRepository {
+    private val wishlist = QWishlistModel.wishlistModel
     override fun existsBy(loginId: LoginId, propertyId: Long): Boolean {
         val userId = resolveUserIdOrNull(loginId) ?: return false
         return wishlistJpaRepository.existsById(WishlistId(userId, propertyId))
@@ -41,7 +44,13 @@ class WishlistRepositoryImpl(
 
     override fun findByUserId(loginId: LoginId, page: Int, size: Int): List<WishlistModel> {
         val userId = resolveUserIdOrNull(loginId) ?: return emptyList()
-        return wishlistJpaRepository.findByUserId(userId, PageRequest.of(page, size))
+        return queryFactory
+            .selectFrom(wishlist)
+            .where(wishlist.userId.eq(userId))
+            .orderBy(wishlist.wishedAt.desc())
+            .offset(page.toLong() * size)
+            .limit(size.toLong())
+            .fetch()
     }
 
     private fun resolveUserIdOrNull(loginId: LoginId): Long? = userRepository.findByLoginId(loginId)?.id
