@@ -13,9 +13,9 @@ import java.time.LocalDateTime
 /**
  * 찜 토글·조회 유스케이스. 토글 멱등은 여기서 — POST/DELETE 2회에도 행 1개, `wishCount` 는 1 만 증감한다(AC-6).
  *
- * wish 흐름은 `existsBy`(LoginId→users.id SELECT) 후 `save`(또 SELECT) 의 read-then-write 중복이 있다.
- * 도메인 boundary 가 LoginId 만 노출하는 결정을 지키기 위해 받아들이며, 단일 쿼리 통합과 wishCount 동시
- * 증감 정합성은 4주차 동시성·캐시 라운드의 영역이다.
+ * 동시 증감 정합(04-b §5-4): 찜 row 추가/제거의 **사실**(새로 추가/실제 제거)을 Repository 가 돌려주고,
+ * 그 사실이 참일 때만 비정규화 카운터를 **조건부 원자 UPDATE** 로 증감한다. 찜 row 변경과 카운터 갱신을 같은
+ * 트랜잭션에 둬, 동시 중복 요청에도 `wishCount` 가 실제 행 수와 일치한다. 응답 수치는 갱신 직후 신선하게 다시 읽는다.
  */
 @Service
 class WishlistFacade(
@@ -25,27 +25,28 @@ class WishlistFacade(
 ) {
     @Transactional
     fun wish(loginId: LoginId, propertyId: Long): WishlistToggleInfo {
-        val property = propertyRepository.findById(propertyId)
-            ?: throw CoreException(ErrorType.NOT_FOUND, "존재하지 않는 숙소입니다.")
-        if (!wishlistRepository.existsBy(loginId, propertyId)) {
-            wishlistRepository.save(loginId, propertyId, LocalDateTime.now(clock))
-            property.incrementWishCount()
-            propertyRepository.save(property)
+        requireProperty(propertyId)
+        if (wishlistRepository.add(loginId, propertyId, LocalDateTime.now(clock))) {
+            propertyRepository.incrementWishCount(propertyId)
         }
-        return WishlistToggleInfo(propertyId, wished = true, wishCount = property.wishCount)
+        return WishlistToggleInfo(propertyId, wished = true, wishCount = wishCountOf(propertyId))
     }
 
     @Transactional
     fun unwish(loginId: LoginId, propertyId: Long): WishlistToggleInfo {
-        val property = propertyRepository.findById(propertyId)
-            ?: throw CoreException(ErrorType.NOT_FOUND, "존재하지 않는 숙소입니다.")
-        if (wishlistRepository.existsBy(loginId, propertyId)) {
-            wishlistRepository.deleteBy(loginId, propertyId)
-            property.decrementWishCount()
-            propertyRepository.save(property)
+        requireProperty(propertyId)
+        if (wishlistRepository.remove(loginId, propertyId)) {
+            propertyRepository.decrementWishCount(propertyId)
         }
-        return WishlistToggleInfo(propertyId, wished = false, wishCount = property.wishCount)
+        return WishlistToggleInfo(propertyId, wished = false, wishCount = wishCountOf(propertyId))
     }
+
+    private fun requireProperty(propertyId: Long) {
+        propertyRepository.findById(propertyId)
+            ?: throw CoreException(ErrorType.NOT_FOUND, "존재하지 않는 숙소입니다.")
+    }
+
+    private fun wishCountOf(propertyId: Long): Int = propertyRepository.findWishCount(propertyId) ?: 0
 
     @Transactional(readOnly = true)
     fun getMyWishes(

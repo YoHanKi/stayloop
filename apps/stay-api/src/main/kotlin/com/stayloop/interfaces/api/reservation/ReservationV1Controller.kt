@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
+import org.springframework.web.bind.annotation.RequestHeader
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.ResponseStatus
@@ -23,8 +24,9 @@ class ReservationV1Controller(
     override fun reserve(
         loginUser: LoginUser,
         @RequestBody request: ReservationV1Dto.ReserveRequest,
+        @RequestHeader(value = "Idempotency-Key", required = false) idempotencyKey: String?,
     ): ApiResponse<ReservationV1Dto.ReservationResponse> =
-        reservationFacade.reserve(request.toCommand(loginUser.loginId))
+        reservationFacade.reserve(request.toCommand(loginUser.loginId, idempotencyKey))
             .let { ReservationV1Dto.ReservationResponse.from(it) }
             .let { ApiResponse.success(it) }
 

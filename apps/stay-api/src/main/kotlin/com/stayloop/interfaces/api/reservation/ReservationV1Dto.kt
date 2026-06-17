@@ -15,8 +15,9 @@ class ReservationV1Dto {
         val guestCount: Int,
         val guestName: String,
         val guestPhoneNumber: String,
+        val issuedCouponId: Long? = null,
     ) {
-        fun toCommand(loginId: LoginId): ReserveCommand =
+        fun toCommand(loginId: LoginId, idempotencyKey: String? = null): ReserveCommand =
             ReserveCommand(
                 loginId = loginId,
                 propertyId = propertyId,
@@ -26,6 +27,8 @@ class ReservationV1Dto {
                 guestCount = guestCount,
                 guestName = guestName,
                 guestPhoneNumber = guestPhoneNumber,
+                issuedCouponId = issuedCouponId,
+                idempotencyKey = idempotencyKey,
             )
     }
 
@@ -40,7 +43,10 @@ class ReservationV1Dto {
         val nights: Long,
         val guestCount: Int,
         val guestName: String,
+        val priceBeforeDiscount: BigDecimal,
+        val discountAmount: BigDecimal,
         val totalPrice: BigDecimal,
+        val couponId: Long?,
         val status: String,
         val cancelledAt: String?,
     ) {
@@ -57,7 +63,10 @@ class ReservationV1Dto {
                     nights = info.nights,
                     guestCount = info.guestCount,
                     guestName = info.guestName,
+                    priceBeforeDiscount = info.priceBeforeDiscount,
+                    discountAmount = info.discountAmount,
                     totalPrice = info.totalPrice,
+                    couponId = info.couponId,
                     status = info.status,
                     cancelledAt = info.cancelledAt,
                 )

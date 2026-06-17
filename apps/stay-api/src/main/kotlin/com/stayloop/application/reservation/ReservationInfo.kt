@@ -17,7 +17,10 @@ data class ReservationInfo(
     val nights: Long,
     val guestCount: Int,
     val guestName: String,
+    val priceBeforeDiscount: BigDecimal,
+    val discountAmount: BigDecimal,
     val totalPrice: BigDecimal,
+    val couponId: Long?,
     val status: String,
     val cancelledAt: String?,
 ) {
@@ -34,7 +37,10 @@ data class ReservationInfo(
                 nights = reservation.period.nights(),
                 guestCount = reservation.guestCount,
                 guestName = reservation.guest.name,
+                priceBeforeDiscount = reservation.priceBeforeDiscount.amount,
+                discountAmount = reservation.discountAmount.amount,
                 totalPrice = reservation.totalPrice.amount,
+                couponId = reservation.couponId,
                 status = reservation.status.name,
                 cancelledAt = reservation.cancelledAt?.toString(),
             )

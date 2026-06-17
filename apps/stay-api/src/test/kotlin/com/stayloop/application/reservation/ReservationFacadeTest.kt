@@ -2,7 +2,13 @@ package com.stayloop.application.reservation
 
 import com.stayloop.application.reservation.command.ReserveCommand
 import com.stayloop.domain.common.value.Money
+import com.stayloop.domain.coupon.CouponService
+import com.stayloop.domain.coupon.CouponTemplateModel
+import com.stayloop.domain.coupon.value.CouponStatus
+import com.stayloop.domain.coupon.value.DiscountType
+import com.stayloop.domain.coupon.value.DiscountValue
 import com.stayloop.domain.inventory.DailyRoomInventoryModel
+import com.stayloop.domain.inventory.DailyRoomInventoryService
 import com.stayloop.domain.property.PropertyModel
 import com.stayloop.domain.property.RoomTypeModel
 import com.stayloop.domain.property.value.Address
@@ -17,13 +23,17 @@ import com.stayloop.domain.reservation.ReservationPriceCalculator
 import com.stayloop.domain.reservation.ReservationService
 import com.stayloop.domain.reservation.value.ReservationStatus
 import com.stayloop.domain.user.value.LoginId
+import com.stayloop.support.concurrency.HotKeyGuard
 import com.stayloop.support.error.CoreException
 import com.stayloop.support.error.ErrorType
+import com.stayloop.support.test.InMemoryCouponTemplateRepository
 import com.stayloop.support.test.InMemoryDailyRoomInventoryRepository
 import com.stayloop.support.test.InMemoryDailyRoomRateRepository
+import com.stayloop.support.test.InMemoryIssuedCouponRepository
 import com.stayloop.support.test.InMemoryPropertyRepository
 import com.stayloop.support.test.InMemoryReservationRepository
 import com.stayloop.support.test.InMemoryRoomTypeRepository
+import com.stayloop.support.test.NoOpTransactionManager
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.BeforeEach
@@ -40,6 +50,9 @@ class ReservationFacadeTest {
     private lateinit var inventoryRepository: InMemoryDailyRoomInventoryRepository
     private lateinit var rateRepository: InMemoryDailyRoomRateRepository
     private lateinit var reservationRepository: InMemoryReservationRepository
+    private lateinit var couponTemplateRepository: InMemoryCouponTemplateRepository
+    private lateinit var issuedCouponRepository: InMemoryIssuedCouponRepository
+    private lateinit var couponService: CouponService
     private lateinit var sut: ReservationFacade
 
     private val alice = LoginId("alice01")
@@ -56,15 +69,22 @@ class ReservationFacadeTest {
         inventoryRepository = InMemoryDailyRoomInventoryRepository()
         rateRepository = InMemoryDailyRoomRateRepository()
         reservationRepository = InMemoryReservationRepository()
+        couponTemplateRepository = InMemoryCouponTemplateRepository()
+        issuedCouponRepository = InMemoryIssuedCouponRepository()
+        couponService = CouponService(couponTemplateRepository, issuedCouponRepository)
         val clock = Clock.fixed(Instant.parse("2026-05-30T00:00:00Z"), ZoneOffset.UTC)
         sut = ReservationFacade(
             propertyRepository,
             roomTypeRepository,
-            inventoryRepository,
             rateRepository,
+            DailyRoomInventoryService(inventoryRepository),
+            couponService,
+            issuedCouponRepository,
             ReservationService(ReservationPriceCalculator()),
             reservationRepository,
+            HotKeyGuard(maxConcurrentPerKey = 64),
             clock,
+            NoOpTransactionManager(),
         )
 
         propertyId = propertyRepository.save(
@@ -125,7 +145,7 @@ class ReservationFacadeTest {
         assertThat(inventoryRepository.findById(roomTypeId, checkIn.plusDays(1))!!.reservedRooms).isEqualTo(1)
     }
 
-    @DisplayName("재고 정보가 일자와 1:1 로 맞지 않으면 BAD_REQUEST 로 거절되고 어떤 재고도 차감되지 않는다(AC-4 가드).")
+    @DisplayName("어느 한 일자의 재고 정보가 없으면 CONFLICT 로 거절되고 어떤 재고도 차감되지 않는다(부분 차감 금지).")
     @Test
     fun shouldRejectAndNotPartiallyDecrementOnMissingInventory() {
         inventoryRepository.save(DailyRoomInventoryModel(roomTypeId, checkIn, totalRooms = 2))
@@ -138,7 +158,29 @@ class ReservationFacadeTest {
 
         assertThatThrownBy { sut.reserve(command()) }
             .isInstanceOf(CoreException::class.java)
-            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+            .extracting("errorType").isEqualTo(ErrorType.CONFLICT)
+        assertThat(inventoryRepository.findById(roomTypeId, checkIn)!!.reservedRooms).isEqualTo(0)
+    }
+
+    @DisplayName("어느 한 일자라도 매진이면 CONFLICT 로 거절되고 어떤 재고도 차감되지 않는다(부분 차감 금지).")
+    @Test
+    fun shouldRejectAndNotPartiallyDecrementOnSoldOut() {
+        inventoryRepository.saveAll(
+            listOf(
+                DailyRoomInventoryModel(roomTypeId, checkIn, totalRooms = 2),
+                DailyRoomInventoryModel(roomTypeId, checkIn.plusDays(1), totalRooms = 1, reservedRooms = 1),
+            ),
+        )
+        rateRepository.saveAll(
+            listOf(
+                DailyRoomRateModel(roomTypeId, checkIn, Money.of(100_000)),
+                DailyRoomRateModel(roomTypeId, checkIn.plusDays(1), Money.of(120_000)),
+            ),
+        )
+
+        assertThatThrownBy { sut.reserve(command()) }
+            .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.CONFLICT)
         assertThat(inventoryRepository.findById(roomTypeId, checkIn)!!.reservedRooms).isEqualTo(0)
     }
 
@@ -212,5 +254,64 @@ class ReservationFacadeTest {
         sut.reserve(command())
 
         assertThat(sut.getMyReservations(alice, 0, 20)).hasSize(1)
+    }
+
+    @DisplayName("쿠폰을 적용하면 할인액을 빼 최종 금액을 매기고 쿠폰은 USED 가 되며 금액 3종이 스냅샷된다.")
+    @Test
+    fun shouldApplyCouponDiscount() {
+        seedFullInventoryAndRate()
+        val couponId = issueCoupon()
+
+        val info = sut.reserve(command().copy(issuedCouponId = couponId))
+
+        assertThat(info.priceBeforeDiscount).isEqualByComparingTo("220000")
+        assertThat(info.discountAmount).isEqualByComparingTo("20000")
+        assertThat(info.totalPrice).isEqualByComparingTo("200000")
+        assertThat(info.couponId).isEqualTo(couponId)
+        assertThat(issuedCouponRepository.findById(couponId)!!.status).isEqualTo(CouponStatus.USED)
+    }
+
+    @DisplayName("예약을 취소하면 재고와 함께 사용한 쿠폰도 AVAILABLE 로 복원된다.")
+    @Test
+    fun shouldRestoreCouponOnCancel() {
+        seedFullInventoryAndRate()
+        val couponId = issueCoupon()
+        val reserved = sut.reserve(command().copy(issuedCouponId = couponId))
+
+        sut.cancel(alice, reserved.reservationId)
+
+        assertThat(issuedCouponRepository.findById(couponId)!!.status).isEqualTo(CouponStatus.AVAILABLE)
+        assertThat(inventoryRepository.findById(roomTypeId, checkIn)!!.reservedRooms).isEqualTo(0)
+    }
+
+    @DisplayName("타인의 쿠폰으로 예약하려 하면 403 으로 거절된다.")
+    @Test
+    fun shouldRejectReserveWithOthersCoupon() {
+        seedFullInventoryAndRate()
+        val couponId = issueCoupon(loginId = bob)
+
+        assertThatThrownBy { sut.reserve(command().copy(issuedCouponId = couponId)) }
+            .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.FORBIDDEN)
+    }
+
+    @DisplayName("같은 멱등 키로 두 번 예약하면 최초 예약을 그대로 재응답하고 재고는 한 번만 차감된다(P1-1).")
+    @Test
+    fun shouldReplayOnSameIdempotencyKey() {
+        seedFullInventoryAndRate()
+
+        val first = sut.reserve(command().copy(idempotencyKey = "idem-1"))
+        val second = sut.reserve(command().copy(idempotencyKey = "idem-1"))
+
+        assertThat(second.reservationId).isEqualTo(first.reservationId)
+        assertThat(inventoryRepository.findById(roomTypeId, checkIn)!!.reservedRooms).isEqualTo(1)
+    }
+
+    private fun issueCoupon(
+        loginId: LoginId = alice,
+        discount: DiscountValue = DiscountValue.of(DiscountType.FIXED, 20_000),
+    ): Long {
+        val templateId = couponTemplateRepository.save(CouponTemplateModel("선착순", discount, totalQuantity = 100)).id
+        return couponService.issue(templateId, loginId).id
     }
 }

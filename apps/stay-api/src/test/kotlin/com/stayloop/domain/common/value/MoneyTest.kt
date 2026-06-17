@@ -55,4 +55,18 @@ class MoneyTest {
         assertThat(Money.of(1000) < Money.of(2000)).isTrue()
         assertThat(Money.of(2000) > Money.of(1000)).isTrue()
     }
+
+    @DisplayName("두 금액을 빼면 차액이 된다.")
+    @Test
+    fun shouldSubtract() {
+        assertThat(Money.of(220_000) - Money.of(20_000)).isEqualTo(Money.of(200_000))
+    }
+
+    @DisplayName("차감 결과가 음수면 BAD_REQUEST 로 거절된다(할인이 원금 초과).")
+    @Test
+    fun shouldReject_whenSubtractionGoesNegative() {
+        assertThatThrownBy { Money.of(10_000) - Money.of(20_000) }
+            .isInstanceOf(CoreException::class.java)
+            .extracting("errorType").isEqualTo(ErrorType.BAD_REQUEST)
+    }
 }

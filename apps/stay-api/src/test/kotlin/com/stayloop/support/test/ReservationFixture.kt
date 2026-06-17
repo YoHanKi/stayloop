@@ -42,6 +42,9 @@ object ReservationFixture {
             period = period(),
             guestCount = guestCount,
             guest = GUEST,
+            priceBeforeDiscount = Money.of(220_000),
+            discountAmount = Money.ZERO,
             totalPrice = Money.of(220_000),
+            couponId = null,
         )
 }

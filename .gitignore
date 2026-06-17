@@ -50,7 +50,9 @@ out/
 
 exp*
 
-docs/
+docs/*
+# 의사결정 기록은 추적한다 (CLAUDE.md "의사결정 기록" 정책)
+!docs/decision/
 
 ### technical observation tests ###
 **/src/test/java/**/technical/
